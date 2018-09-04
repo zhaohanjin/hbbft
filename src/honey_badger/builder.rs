@@ -51,7 +51,7 @@ where
             has_input: false,
             epochs: BTreeMap::new(),
             max_future_epochs: self.max_future_epochs as u64,
-            incoming_queue: BTreeMap::new(),
+            outgoing_queue: BTreeMap::new(),
             remote_epochs: BTreeMap::new(),
         };
         let step = if self.netinfo.is_validator() {
