@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::epoch_state::EpochState;
 use super::{Batch, Error, ErrorKind, HoneyBadgerBuilder, Message, MessageContent, Result};
 use fault_log::{Fault, FaultKind};
-use messaging::{self, DistAlgorithm, NetworkInfo, Target, TargetedMessage};
+use messaging::{self, DistAlgorithm, NetworkInfo, Target};
 use traits::{Contribution, NodeIdT};
 
 /// An instance of the Honey Badger Byzantine fault tolerant consensus algorithm.
@@ -90,7 +90,7 @@ where
             }
         }
         self.messages.extend(passed_msgs);
-        deferred_msgs.iter().map(|msg| {
+        deferred_msgs.into_iter().map(|msg| {
             if let Target::Node(id) = msg.target {
                 (id, msg.message)
             } else {
