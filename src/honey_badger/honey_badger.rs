@@ -45,7 +45,7 @@ where
         &mut self,
         remote_epochs: &'i BTreeMap<N, u64>,
         max_future_epochs: u64,
-        all_ids: I,
+        remote_ids: I,
     ) -> impl Iterator<Item = (N, Message<N>)>
     where
         I: 'i + Iterator<Item = &'i N>,
@@ -53,17 +53,19 @@ where
     {
         let messages: Vec<_> = self.messages.drain(..).collect();
         let (mut passed_msgs, failed_msgs): (Vec<_>, Vec<_>) =
-            messages.into_iter().partition(|msg| {
-                let epoch = msg.message.epoch();
-                let pass = |&e| e >= epoch && epoch <= e + max_future_epochs;
-                match &msg.target {
-                    Target::All => remote_epochs.values().all(pass),
-                    Target::Node(id) => if let Some(e) = remote_epochs.get(&id) {
-                        pass(e)
-                    } else {
-                        false
-                    },
+            messages.into_iter().partition(|msg| match &msg.message {
+                Message::HoneyBadger { epoch, .. } => {
+                    let pass = |&e| e >= *epoch && *epoch <= e + max_future_epochs;
+                    match &msg.target {
+                        Target::All => remote_epochs.values().all(pass),
+                        Target::Node(id) => if let Some(e) = remote_epochs.get(&id) {
+                            pass(e)
+                        } else {
+                            false
+                        },
+                    }
                 }
+                Message::EpochStarted(_) => true,
             });
         // `Target::All` messages contained in the result of the partitioning are analyzed further
         // and each split into two sets of point messages: those which can be sent without delay and
@@ -71,7 +73,7 @@ where
         let (multicasts, mut deferred_msgs): (Vec<_>, Vec<_>) = failed_msgs
             .into_iter()
             .partition(|msg| Target::All == msg.target);
-        let all_nodes: BTreeSet<&N> = all_ids.collect();
+        let remote_nodes: BTreeSet<&N> = remote_ids.collect();
         for msg in multicasts {
             let message = msg.message;
             let epoch = message.epoch();
@@ -84,7 +86,7 @@ where
             for &id in &accepting_nodes {
                 passed_msgs.push(Target::Node(id.clone()).message(message.clone()));
             }
-            let rejecting_nodes = all_nodes.difference(&accepting_nodes);
+            let rejecting_nodes = remote_nodes.difference(&accepting_nodes);
             for &id in rejecting_nodes {
                 deferred_msgs.push(Target::Node(id.clone()).message(message.clone()));
             }
@@ -156,7 +158,7 @@ where
 
     /// Handles a message received from `sender_id`.
     fn handle_message(&mut self, sender_id: &N, message: Message<N>) -> Result<Step<C, N>> {
-        match message {
+        let step = match message {
             Message::HoneyBadger { epoch, content } => {
                 if !self.netinfo.is_node_validator(sender_id) {
                     return Err(ErrorKind::SenderNotValidator.into());
@@ -164,7 +166,17 @@ where
                 self.handle_honey_badger_message(sender_id, epoch, content)
             }
             Message::EpochStarted(epoch) => Ok(self.handle_epoch_started(sender_id, epoch)),
+        }?;
+        if step.messages.is_empty() {
+            debug!(
+                "{:?}@{} has no outgoing messages and queued messages: {:?}",
+                self.netinfo.our_id(),
+                self.epoch,
+                self.outgoing_queue
+            );
+            debug!("Remote epochs: {:?}", self.remote_epochs);
         }
+        Ok(step)
     }
 
     /// Handles a Honey Badger algorithm message in a given epoch.
@@ -176,6 +188,14 @@ where
     ) -> Result<Step<C, N>> {
         if epoch < self.epoch || epoch > self.epoch + self.max_future_epochs {
             // Reject messages from past epochs or from future epochs that are not in the range yet.
+            debug!(
+                "{:?}@{} rejected message {}:{:?} with remote epochs {:?}",
+                self.netinfo.our_id(),
+                self.epoch,
+                epoch,
+                content,
+                self.remote_epochs
+            );
             Ok(Fault::new(sender_id.clone(), FaultKind::EpochOutOfRange).into())
         } else {
             // Accept and handle the message.
@@ -183,10 +203,13 @@ where
                 .epoch_state_mut(epoch)?
                 .handle_message_content(sender_id, content)?;
             step.extend(self.try_output_batches()?);
+            let our_id = self.netinfo.our_id();
             let deferred_msgs = step.defer_messages(
                 &self.remote_epochs,
                 self.max_future_epochs,
-                self.netinfo.all_ids(),
+                self.netinfo
+                    .all_ids()
+                    .filter(|&id| id != our_id),
             );
             // Append the deferred messages onto the queue.
             for (id, message) in deferred_msgs {
@@ -209,6 +232,16 @@ where
                     *e = epoch;
                 }
             }).or_insert(epoch);
+        // Remove all messages queued for the remote node from earlier epochs.
+        let earlier_keys: Vec<_> = self
+            .outgoing_queue
+            .keys()
+            .cloned()
+            .filter(|(id, e)| id == sender_id && e < &epoch)
+            .collect();
+        for key in earlier_keys {
+            self.outgoing_queue.remove(&key);
+        }
         // If there are any messages to `sender_id` for `epoch`, send them now.
         if let Some(messages) = self.outgoing_queue.remove(&(sender_id.clone(), epoch)) {
             Step::from(
