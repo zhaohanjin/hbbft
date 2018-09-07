@@ -1,19 +1,20 @@
-use rand::Rand;
+use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 use std::sync::Arc;
 
 use bincode;
 use crypto::Signature;
+use rand::Rand;
 use serde::{Deserialize, Serialize};
 
 use super::votes::{SignedVote, VoteCounter};
 use super::{
     Batch, Change, ChangeState, DynamicHoneyBadgerBuilder, Error, ErrorKind, Input,
-    InternalContrib, KeyGenMessage, KeyGenState, Message, Result, SignedKeyGenMsg, Step,
+    InternalContrib, KeyGenMessage, KeyGenState, Message, MessageContent, Result, SignedKeyGenMsg,
 };
 use fault_log::{Fault, FaultKind, FaultLog};
 use honey_badger::{self, HoneyBadger, Message as HbMessage};
-use messaging::{DistAlgorithm, NetworkInfo, Target};
+use messaging::{self, DistAlgorithm, NetworkInfo, Target};
 use sync_key_gen::{Ack, Part, PartOutcome, SyncKeyGen};
 use traits::{Contribution, NodeIdT};
 
@@ -34,8 +35,81 @@ pub struct DynamicHoneyBadger<C, N: Rand> {
     pub(super) honey_badger: HoneyBadger<InternalContrib<C, N>, N>,
     /// The current key generation process, and the change it applies to.
     pub(super) key_gen_state: Option<KeyGenState<N>>,
-    /// A queue for messages from future epochs that cannot be handled yet.
-    pub(super) incoming_queue: Vec<(N, Message<N>)>,
+    /// Messages that couldn't be handled yet by remote nodes.
+    pub(super) outgoing_queue: BTreeMap<(N, u64), Vec<Message<N>>>,
+    /// Known current epochs of remote nodes.
+    pub(super) remote_epochs: BTreeMap<N, u64>,
+}
+
+pub type Step<C, N> = messaging::Step<DynamicHoneyBadger<C, N>>;
+
+impl<C, N> Step<C, N>
+where
+    C: Contribution + Serialize + for<'r> Deserialize<'r>,
+    N: NodeIdT + Serialize + for<'r> Deserialize<'r> + Rand,
+{
+    /// Removes and returns any messages that are not accepted by remote nodes according to the
+    /// mapping `remote_epochs`. This way the returned messages are postponed until later, and the
+    /// remaining messages can be sent to remote nodes without delay.
+    fn defer_messages<'i, I>(
+        &mut self,
+        remote_epochs: &'i BTreeMap<N, u64>,
+        remote_ids: I,
+    ) -> impl Iterator<Item = (N, Message<N>)>
+    where
+        I: 'i + Iterator<Item = &'i N>,
+        N: 'i,
+    {
+        let messages: Vec<_> = self.messages.drain(..).collect();
+        let (mut passed_msgs, failed_msgs): (Vec<_>, Vec<_>) =
+            messages.into_iter().partition(|msg| match &msg.message {
+                Message::DynamicHoneyBadger(ref content) => {
+                    let epoch = content.start_epoch();
+                    let pass = |&e| e == epoch;
+                    match &msg.target {
+                        Target::All => remote_epochs.values().all(pass),
+                        Target::Node(id) => if let Some(e) = remote_epochs.get(&id) {
+                            pass(e)
+                        } else {
+                            false
+                        },
+                    }
+                }
+                Message::EpochStarted(_) => true,
+            });
+        // `Target::All` messages contained in the result of the partitioning are analyzed further
+        // and each split into two sets of point messages: those which can be sent without delay and
+        // those which should be postponed.
+        let (multicasts, mut deferred_msgs): (Vec<_>, Vec<_>) = failed_msgs
+            .into_iter()
+            .partition(|msg| Target::All == msg.target);
+        let remote_nodes: BTreeSet<&N> = remote_ids.collect();
+        for msg in multicasts {
+            let message = msg.message;
+            let epoch = message.start_epoch();
+            let pass = |&&e| e == epoch;
+            let accepting_nodes: BTreeSet<&N> = remote_epochs
+                .iter()
+                .filter(|(_, e)| pass(e))
+                .map(|(id, _)| id)
+                .collect();
+            for &id in &accepting_nodes {
+                passed_msgs.push(Target::Node(id.clone()).message(message.clone()));
+            }
+            let rejecting_nodes = remote_nodes.difference(&accepting_nodes);
+            for &id in rejecting_nodes {
+                deferred_msgs.push(Target::Node(id.clone()).message(message.clone()));
+            }
+        }
+        self.messages.extend(passed_msgs);
+        deferred_msgs.into_iter().map(|msg| {
+            if let Target::Node(id) = msg.target {
+                (id, msg.message)
+            } else {
+                panic!("`defer_messages` failed");
+            }
+        })
+    }
 }
 
 impl<C, N> DistAlgorithm for DynamicHoneyBadger<C, N>
@@ -59,28 +133,9 @@ where
     }
 
     fn handle_message(&mut self, sender_id: &N, message: Self::Message) -> Result<Step<C, N>> {
-        let epoch = message.start_epoch();
-        if epoch < self.start_epoch {
-            // Obsolete message.
-            Ok(Step::default())
-        } else if epoch > self.start_epoch {
-            // Message cannot be handled yet. Save it for later.
-            let entry = (sender_id.clone(), message);
-            self.incoming_queue.push(entry);
-            Ok(Step::default())
-        } else {
-            match message {
-                Message::HoneyBadger(_, hb_msg) => {
-                    self.handle_honey_badger_message(sender_id, hb_msg)
-                }
-                Message::KeyGen(_, kg_msg, sig) => self
-                    .handle_key_gen_message(sender_id, kg_msg, *sig)
-                    .map(FaultLog::into),
-                Message::SignedVote(signed_vote) => self
-                    .vote_counter
-                    .add_pending_vote(sender_id, signed_vote)
-                    .map(FaultLog::into),
-            }
+        match message {
+            Message::DynamicHoneyBadger(content) => self.handle_message_content(sender_id, content),
+            Message::EpochStarted(epoch) => Ok(self.handle_epoch_started(sender_id, epoch)),
         }
     }
 
@@ -108,6 +163,81 @@ where
         self.honey_badger.has_input()
     }
 
+    /// Handles a Dynamic Honey Badger algorithm message.
+    pub fn handle_message_content(
+        &mut self,
+        sender_id: &N,
+        content: MessageContent<N>,
+    ) -> Result<Step<C, N>> {
+        if content.start_epoch() != self.start_epoch {
+            // Message epoch is out of range.
+            warn!(
+                "{:?}@{} discarded {:?}",
+                self.netinfo.our_id(),
+                self.start_epoch,
+                content
+            );
+            return Ok(Fault::new(sender_id.clone(), FaultKind::EpochOutOfRange).into());
+        }
+        let mut step = match content {
+            MessageContent::HoneyBadger(_, hb_msg) => {
+                self.handle_honey_badger_message(sender_id, hb_msg)
+            }
+            MessageContent::KeyGen(_, kg_msg, sig) => self
+                .handle_key_gen_message(sender_id, kg_msg, *sig)
+                .map(FaultLog::into),
+            MessageContent::SignedVote(signed_vote) => self
+                .vote_counter
+                .add_pending_vote(sender_id, signed_vote)
+                .map(FaultLog::into),
+        }?;
+        let our_id = self.netinfo.our_id();
+        let deferred_msgs = step.defer_messages(
+            &self.remote_epochs,
+            self.netinfo.all_ids().filter(|&id| id != our_id),
+        );
+        // Append the deferred messages onto the queue.
+        for (id, message) in deferred_msgs {
+            let epoch = message.start_epoch();
+            self.outgoing_queue
+                .entry((id, epoch))
+                .and_modify(|e| e.push(message.clone()))
+                .or_insert_with(|| vec![message.clone()]);
+        }
+        Ok(step)
+    }
+
+    /// Handles an epoch start announcement.
+    fn handle_epoch_started(&mut self, sender_id: &N, epoch: u64) -> Step<C, N> {
+        self.remote_epochs
+            .entry(sender_id.clone())
+            .and_modify(|e| {
+                if *e < epoch {
+                    *e = epoch;
+                }
+            }).or_insert(epoch);
+        // Remove all messages queued for the remote node from earlier epochs.
+        let earlier_keys: Vec<_> = self
+            .outgoing_queue
+            .keys()
+            .cloned()
+            .filter(|(id, e)| id == sender_id && e < &epoch)
+            .collect();
+        for key in earlier_keys {
+            self.outgoing_queue.remove(&key);
+        }
+        // If there are any messages to `sender_id` for `epoch`, send them now.
+        if let Some(messages) = self.outgoing_queue.remove(&(sender_id.clone(), epoch)) {
+            Step::from(
+                messages
+                    .into_iter()
+                    .map(|msg| Target::Node(sender_id.clone()).message(msg)),
+            )
+        } else {
+            Step::default()
+        }
+    }
+
     /// Proposes a contribution in the current epoch.
     pub fn propose(&mut self, contrib: C) -> Result<Step<C, N>> {
         let step = self
@@ -126,7 +256,7 @@ where
             return Ok(Step::default()); // TODO: Return an error?
         }
         let signed_vote = self.vote_counter.sign_vote_for(change)?.clone();
-        let msg = Message::SignedVote(signed_vote);
+        let msg = Message::DynamicHoneyBadger(MessageContent::SignedVote(signed_vote));
         Ok(Target::All.message(msg).into())
     }
 
@@ -228,7 +358,9 @@ where
     ) -> Result<Step<C, N>> {
         let mut step: Step<C, N> = Step::default();
         let start_epoch = self.start_epoch;
-        let output = step.extend_with(hb_step, |hb_msg| Message::HoneyBadger(start_epoch, hb_msg));
+        let output = step.extend_with(hb_step, |hb_msg| {
+            Message::DynamicHoneyBadger(MessageContent::HoneyBadger(start_epoch, hb_msg))
+        });
         for hb_batch in output {
             // Create the batch we output ourselves. It will contain the _user_ transactions of
             // `hb_batch`, and the current change state.
@@ -271,8 +403,7 @@ where
                 // If DKG completed, apply the change, restart Honey Badger, and inform the user.
                 debug!("{:?} DKG for {:?} complete!", self.our_id(), kgs.change);
                 self.netinfo = kgs.key_gen.into_network_info()?;
-                let step_on_restart = self.restart_honey_badger(batch.epoch + 1)?;
-                step.extend(step_on_restart);
+                step.extend(self.restart_honey_badger(batch.epoch + 1)?);
                 batch.set_change(ChangeState::Complete(kgs.change), &self.netinfo);
             } else if let Some(change) = self.vote_counter.compute_winner().cloned() {
                 // If there is a new change, restart DKG. Inform the user about the current change.
@@ -280,13 +411,6 @@ where
                 batch.set_change(ChangeState::InProgress(change), &self.netinfo);
             }
             step.output.push_back(batch);
-        }
-        // If `start_epoch` changed, we can now handle some queued messages.
-        if start_epoch < self.start_epoch {
-            let queue = mem::replace(&mut self.incoming_queue, Vec::new());
-            for (sender_id, msg) in queue {
-                step.extend(self.handle_message(&sender_id, msg)?);
-            }
         }
         Ok(step)
     }
@@ -332,7 +456,12 @@ where
             .max_future_epochs(self.max_future_epochs)
             .build();
         self.honey_badger = hb;
-        self.process_output(hb_step)
+        // The first message in an epoch announces the epoch transition.
+        let mut step: Step<C, N> = Target::All
+            .message(Message::EpochStarted(self.start_epoch))
+            .into();
+        step.extend(self.process_output(hb_step)?);
+        Ok(step)
     }
 
     /// Handles a `Part` message that was output by Honey Badger.
@@ -365,7 +494,8 @@ where
                 SignedKeyGenMsg(self.start_epoch, our_id, kg_msg.clone(), *sig.clone());
             self.key_gen_msg_buffer.push(signed_msg);
         }
-        let msg = Message::KeyGen(self.start_epoch, kg_msg, sig);
+        let msg =
+            Message::DynamicHoneyBadger(MessageContent::KeyGen(self.start_epoch, kg_msg, sig));
         Ok(Target::All.message(msg).into())
     }
 

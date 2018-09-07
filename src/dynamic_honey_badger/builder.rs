@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::default::Default;
 use std::iter::once;
 use std::marker::PhantomData;
@@ -7,9 +8,9 @@ use crypto::{SecretKey, SecretKeySet, SecretKeyShare};
 use rand::{self, Rand, Rng};
 use serde::{Deserialize, Serialize};
 
-use super::{ChangeState, DynamicHoneyBadger, JoinPlan, Result, Step, VoteCounter};
+use super::{ChangeState, DynamicHoneyBadger, JoinPlan, Message, Result, Step, VoteCounter};
 use honey_badger::HoneyBadger;
-use messaging::NetworkInfo;
+use messaging::{NetworkInfo, Target};
 use traits::{Contribution, NodeIdT};
 
 /// A Dynamic Honey Badger builder, to configure the parameters and create new instances of
@@ -61,9 +62,12 @@ where
             key_gen_msg_buffer: Vec::new(),
             honey_badger,
             key_gen_state: None,
-            incoming_queue: Vec::new(),
+            outgoing_queue: BTreeMap::new(),
+            remote_epochs: BTreeMap::new(),
         };
-        let step = dhb.process_output(hb_step)?;
+        // The first message in an epoch announces the epoch transition.
+        let mut step: Step<C, N> = Target::All.message(Message::EpochStarted(0)).into();
+        step.extend(dhb.process_output(hb_step)?);
         Ok((dhb, step))
     }
 
@@ -103,16 +107,21 @@ where
             netinfo,
             max_future_epochs: self.max_future_epochs,
             start_epoch,
-            vote_counter: VoteCounter::new(arc_netinfo, join_plan.epoch),
+            vote_counter: VoteCounter::new(arc_netinfo, start_epoch),
             key_gen_msg_buffer: Vec::new(),
             honey_badger,
             key_gen_state: None,
-            incoming_queue: Vec::new(),
+            outgoing_queue: BTreeMap::new(),
+            remote_epochs: BTreeMap::new(),
         };
-        let mut step = dhb.process_output(hb_step)?;
+        // The first message in an epoch announces the epoch transition.
+        let mut step: Step<C, N> = Target::All
+            .message(Message::EpochStarted(start_epoch))
+            .into();
+        step.extend(dhb.process_output(hb_step)?);
         match join_plan.change {
             ChangeState::InProgress(ref change) => {
-                step.extend(dhb.update_key_gen(join_plan.epoch, change)?)
+                step.extend(dhb.update_key_gen(start_epoch, change)?)
             }
             ChangeState::None | ChangeState::Complete(..) => (),
         };

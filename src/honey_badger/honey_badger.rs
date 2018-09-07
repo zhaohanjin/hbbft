@@ -163,7 +163,7 @@ where
                 if !self.netinfo.is_node_validator(sender_id) {
                     return Err(ErrorKind::SenderNotValidator.into());
                 }
-                self.handle_honey_badger_message(sender_id, epoch, content)
+                self.handle_message_content(sender_id, epoch, content)
             }
             Message::EpochStarted(epoch) => Ok(self.handle_epoch_started(sender_id, epoch)),
         }?;
@@ -180,7 +180,7 @@ where
     }
 
     /// Handles a Honey Badger algorithm message in a given epoch.
-    fn handle_honey_badger_message(
+    fn handle_message_content(
         &mut self,
         sender_id: &N,
         epoch: u64,
@@ -188,39 +188,34 @@ where
     ) -> Result<Step<C, N>> {
         if epoch < self.epoch || epoch > self.epoch + self.max_future_epochs {
             // Reject messages from past epochs or from future epochs that are not in the range yet.
-            debug!(
-                "{:?}@{} rejected message {}:{:?} with remote epochs {:?}",
+            warn!(
+                "{:?}@{} discarded {:?}",
                 self.netinfo.our_id(),
                 self.epoch,
-                epoch,
-                content,
-                self.remote_epochs
+                content
             );
-            Ok(Fault::new(sender_id.clone(), FaultKind::EpochOutOfRange).into())
-        } else {
-            // Accept and handle the message.
-            let mut step = self
-                .epoch_state_mut(epoch)?
-                .handle_message_content(sender_id, content)?;
-            step.extend(self.try_output_batches()?);
-            let our_id = self.netinfo.our_id();
-            let deferred_msgs = step.defer_messages(
-                &self.remote_epochs,
-                self.max_future_epochs,
-                self.netinfo
-                    .all_ids()
-                    .filter(|&id| id != our_id),
-            );
-            // Append the deferred messages onto the queue.
-            for (id, message) in deferred_msgs {
-                let epoch = message.epoch();
-                self.outgoing_queue
-                    .entry((id, epoch))
-                    .and_modify(|e| e.push(message.clone()))
-                    .or_insert_with(|| vec![message.clone()]);
-            }
-            Ok(step)
+            return Ok(Fault::new(sender_id.clone(), FaultKind::EpochOutOfRange).into());
         }
+        // Accept and handle the message.
+        let mut step = self
+            .epoch_state_mut(epoch)?
+            .handle_message_content(sender_id, content)?;
+        step.extend(self.try_output_batches()?);
+        let our_id = self.netinfo.our_id();
+        let deferred_msgs = step.defer_messages(
+            &self.remote_epochs,
+            self.max_future_epochs,
+            self.netinfo.all_ids().filter(|&id| id != our_id),
+        );
+        // Append the deferred messages onto the queue.
+        for (id, message) in deferred_msgs {
+            let epoch = message.epoch();
+            self.outgoing_queue
+                .entry((id, epoch))
+                .and_modify(|e| e.push(message.clone()))
+                .or_insert_with(|| vec![message.clone()]);
+        }
+        Ok(step)
     }
 
     /// Handles an epoch start announcement.
@@ -272,6 +267,11 @@ where
         // Clear the state of the old epoch.
         self.epochs.remove(&self.epoch);
         self.epoch += 1;
+        debug!(
+            "{:?} updated to epoch {}",
+            self.netinfo.our_id(),
+            self.epoch
+        );
         self.has_input = false;
         // The first message in an epoch announces the epoch transition.
         Ok(Target::All

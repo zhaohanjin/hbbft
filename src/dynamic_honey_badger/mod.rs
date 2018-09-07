@@ -68,17 +68,14 @@ use std::collections::BTreeMap;
 
 use self::votes::{SignedVote, VoteCounter};
 use honey_badger::Message as HbMessage;
-use messaging;
 use sync_key_gen::{Ack, Part, SyncKeyGen};
 use traits::NodeIdT;
 
 pub use self::batch::Batch;
 pub use self::builder::DynamicHoneyBadgerBuilder;
 pub use self::change::{Change, ChangeState};
-pub use self::dynamic_honey_badger::DynamicHoneyBadger;
+pub use self::dynamic_honey_badger::{DynamicHoneyBadger, Step};
 pub use self::error::{Error, ErrorKind, Result};
-
-pub type Step<C, N> = messaging::Step<DynamicHoneyBadger<C, N>>;
 
 /// The user input for `DynamicHoneyBadger`.
 #[derive(Clone, Debug)]
@@ -100,9 +97,9 @@ pub enum KeyGenMessage {
     Ack(Ack),
 }
 
-/// A message sent to or received from another node's Honey Badger instance.
+/// The content of a `DynamicHoneyBadger` message.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum Message<N: Rand> {
+pub enum MessageContent<N: Rand> {
     /// A message belonging to the `HoneyBadger` algorithm started in the given epoch.
     HoneyBadger(u64, HbMessage<N>),
     /// A transaction to be committed, signed by a node.
@@ -111,20 +108,47 @@ pub enum Message<N: Rand> {
     SignedVote(SignedVote<N>),
 }
 
-impl<N: Rand> Message<N> {
+impl<N: Rand> MessageContent<N> {
     fn start_epoch(&self) -> u64 {
         match *self {
-            Message::HoneyBadger(epoch, _) => epoch,
-            Message::KeyGen(epoch, _, _) => epoch,
-            Message::SignedVote(ref signed_vote) => signed_vote.era(),
+            MessageContent::HoneyBadger(epoch, ..) => epoch,
+            MessageContent::KeyGen(epoch, ..) => epoch,
+            MessageContent::SignedVote(ref signed_vote) => signed_vote.era(),
         }
     }
 
     pub fn epoch(&self) -> u64 {
         match *self {
-            Message::HoneyBadger(start_epoch, ref msg) => start_epoch + msg.epoch(),
-            Message::KeyGen(epoch, _, _) => epoch,
-            Message::SignedVote(ref signed_vote) => signed_vote.era(),
+            MessageContent::HoneyBadger(start_epoch, ref msg) => start_epoch + msg.epoch(),
+            MessageContent::KeyGen(epoch, ..) => epoch,
+            MessageContent::SignedVote(ref signed_vote) => signed_vote.era(),
+        }
+    }
+}
+
+/// A message sent to or received from another node's Dynamic Honey Badger instance.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum Message<N: Rand> {
+    /// A message belonging to the `DynamicHoneyBadger` algorithm.
+    DynamicHoneyBadger(MessageContent<N>),
+    /// A Dynamic Honey Badger participant uses this message to announce its transition to the given
+    /// epoch. This message informs the recipients that this participant now accepts messages for
+    /// this epoch only and drops any incoming messages from earlier or later epochs.
+    EpochStarted(u64),
+}
+
+impl<N: Rand> Message<N> {
+    fn start_epoch(&self) -> u64 {
+        match *self {
+            Message::DynamicHoneyBadger(ref content) => content.start_epoch(),
+            Message::EpochStarted(epoch) => epoch,
+        }
+    }
+
+    pub fn epoch(&self) -> u64 {
+        match *self {
+            Message::DynamicHoneyBadger(ref content) => content.epoch(),
+            Message::EpochStarted(epoch) => epoch,
         }
     }
 }
