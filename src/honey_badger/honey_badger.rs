@@ -58,11 +58,7 @@ where
                     let pass = |&e| e >= *epoch && *epoch <= e + max_future_epochs;
                     match &msg.target {
                         Target::All => remote_epochs.values().all(pass),
-                        Target::Node(id) => if let Some(e) = remote_epochs.get(&id) {
-                            pass(e)
-                        } else {
-                            false
-                        },
+                        Target::Node(id) => remote_epochs.get(&id).map_or(false, pass),
                     }
                 }
                 Message::EpochStarted(_) => true,
@@ -167,15 +163,14 @@ where
             }
             Message::EpochStarted(epoch) => Ok(self.handle_epoch_started(sender_id, epoch)),
         }?;
-        if step.messages.is_empty() {
-            debug!(
-                "{:?}@{} has no outgoing messages and queued messages: {:?}",
-                self.netinfo.our_id(),
-                self.epoch,
-                self.outgoing_queue
-            );
-            debug!("Remote epochs: {:?}", self.remote_epochs);
-        }
+        debug!(
+            "{:?}@{} outgoing messages {:?} --- queued messages: {:?} --- remote epochs: {:?}",
+            self.netinfo.our_id(),
+            self.epoch,
+            step.messages,
+            self.outgoing_queue,
+            self.remote_epochs
+        );
         Ok(step)
     }
 
@@ -189,10 +184,12 @@ where
         if epoch < self.epoch || epoch > self.epoch + self.max_future_epochs {
             // Reject messages from past epochs or from future epochs that are not in the range yet.
             warn!(
-                "{:?}@{} discarded {:?}",
+                "{:?}@{} discarded {:?}:{:?}@{}",
                 self.netinfo.our_id(),
                 self.epoch,
-                content
+                sender_id,
+                content,
+                epoch
             );
             return Ok(Fault::new(sender_id.clone(), FaultKind::EpochOutOfRange).into());
         }

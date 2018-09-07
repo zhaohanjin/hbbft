@@ -68,11 +68,7 @@ where
                     let pass = |&e| e == epoch;
                     match &msg.target {
                         Target::All => remote_epochs.values().all(pass),
-                        Target::Node(id) => if let Some(e) = remote_epochs.get(&id) {
-                            pass(e)
-                        } else {
-                            false
-                        },
+                        Target::Node(id) => remote_epochs.get(&id).map_or(false, pass),
                     }
                 }
                 Message::EpochStarted(_) => true,
@@ -133,10 +129,19 @@ where
     }
 
     fn handle_message(&mut self, sender_id: &N, message: Self::Message) -> Result<Step<C, N>> {
-        match message {
+        let step = match message {
             Message::DynamicHoneyBadger(content) => self.handle_message_content(sender_id, content),
             Message::EpochStarted(epoch) => Ok(self.handle_epoch_started(sender_id, epoch)),
-        }
+        }?;
+        debug!(
+            "{:?}@{} outgoing DHB messages {:?} --- queued messages: {:?} --- remote epochs: {:?}",
+            self.netinfo.our_id(),
+            self.start_epoch,
+            step.messages,
+            self.outgoing_queue,
+            self.remote_epochs
+        );
+        Ok(step)
     }
 
     fn terminated(&self) -> bool {
@@ -169,13 +174,16 @@ where
         sender_id: &N,
         content: MessageContent<N>,
     ) -> Result<Step<C, N>> {
-        if content.start_epoch() != self.start_epoch {
+        let start_epoch = content.start_epoch();
+        if start_epoch != self.start_epoch {
             // Message epoch is out of range.
             warn!(
-                "{:?}@{} discarded {:?}",
+                "{:?}@{} discarded {:?}:{:?}@{}",
                 self.netinfo.our_id(),
                 self.start_epoch,
-                content
+                sender_id,
+                content,
+                start_epoch
             );
             return Ok(Fault::new(sender_id.clone(), FaultKind::EpochOutOfRange).into());
         }
@@ -439,8 +447,7 @@ where
         let (key_gen, part) = SyncKeyGen::new(our_id, sk, pub_keys, threshold)?;
         self.key_gen_state = Some(KeyGenState::new(key_gen, change.clone()));
         if let Some(part) = part {
-            let step_on_send = self.send_transaction(KeyGenMessage::Part(part))?;
-            step.extend(step_on_send);
+            step.extend(self.send_transaction(KeyGenMessage::Part(part))?);
         }
         Ok(step)
     }
@@ -452,14 +459,14 @@ where
         let netinfo = Arc::new(self.netinfo.clone());
         let counter = VoteCounter::new(netinfo.clone(), epoch);
         mem::replace(&mut self.vote_counter, counter);
-        let (hb, hb_step) = HoneyBadger::builder(netinfo)
-            .max_future_epochs(self.max_future_epochs)
-            .build();
-        self.honey_badger = hb;
         // The first message in an epoch announces the epoch transition.
         let mut step: Step<C, N> = Target::All
             .message(Message::EpochStarted(self.start_epoch))
             .into();
+        let (hb, hb_step) = HoneyBadger::builder(netinfo)
+            .max_future_epochs(self.max_future_epochs)
+            .build();
+        self.honey_badger = hb;
         step.extend(self.process_output(hb_step)?);
         Ok(step)
     }
