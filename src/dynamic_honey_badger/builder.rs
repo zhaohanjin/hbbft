@@ -8,9 +8,9 @@ use crypto::{SecretKey, SecretKeySet, SecretKeyShare};
 use rand::{self, Rand, Rng};
 use serde::{Deserialize, Serialize};
 
-use super::{ChangeState, DynamicHoneyBadger, JoinPlan, Message, Result, Step, VoteCounter};
+use super::{ChangeState, DynamicHoneyBadger, JoinPlan, Result, Step, VoteCounter};
 use honey_badger::HoneyBadger;
-use messaging::{NetworkInfo, Target};
+use messaging::NetworkInfo;
 use traits::{Contribution, NodeIdT};
 
 /// A Dynamic Honey Badger builder, to configure the parameters and create new instances of
@@ -65,9 +65,7 @@ where
             outgoing_queue: BTreeMap::new(),
             remote_epochs: BTreeMap::new(),
         };
-        // The first message in an epoch announces the epoch transition.
-        let mut step: Step<C, N> = Target::All.message(Message::EpochStarted(0)).into();
-        step.extend(dhb.process_output(hb_step)?);
+        let step = dhb.process_output(hb_step)?;
         Ok((dhb, step))
     }
 
@@ -114,11 +112,7 @@ where
             outgoing_queue: BTreeMap::new(),
             remote_epochs: BTreeMap::new(),
         };
-        // The first message in an epoch announces the epoch transition.
-        let mut step: Step<C, N> = Target::All
-            .message(Message::EpochStarted(start_epoch))
-            .into();
-        step.extend(dhb.process_output(hb_step)?);
+        let mut step = dhb.process_output(hb_step)?;
         match join_plan.change {
             ChangeState::InProgress(ref change) => {
                 step.extend(dhb.update_key_gen(start_epoch, change)?)

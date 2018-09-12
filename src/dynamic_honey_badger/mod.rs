@@ -62,9 +62,11 @@ mod dynamic_honey_badger;
 mod error;
 mod votes;
 
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
+
 use crypto::{PublicKey, PublicKeySet, Signature};
 use rand::Rand;
-use std::collections::BTreeMap;
 
 use self::votes::{SignedVote, VoteCounter};
 use honey_badger::Message as HbMessage;
@@ -117,12 +119,72 @@ impl<N: Rand> MessageContent<N> {
         }
     }
 
-    pub fn epoch(&self) -> u64 {
+    pub fn epoch(&self) -> DynamicEpoch {
         match *self {
-            MessageContent::HoneyBadger(start_epoch, ref msg) => start_epoch + msg.epoch(),
-            MessageContent::KeyGen(epoch, ..) => epoch,
-            MessageContent::SignedVote(ref signed_vote) => signed_vote.era(),
+            MessageContent::HoneyBadger(start_epoch, ref msg) => {
+                DynamicEpoch::new(start_epoch, Some(msg.epoch()))
+            }
+            MessageContent::KeyGen(epoch, ..) => DynamicEpoch::new(epoch, None),
+            MessageContent::SignedVote(ref signed_vote) => {
+                DynamicEpoch::new(signed_vote.era(), None)
+            }
         }
+    }
+}
+
+/// The detailed epoch of `DynamicHoneyBadger` consisting of the epoch after the last restart of the
+/// `HoneyBadger` instance and the current epoch of that instance.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DynamicEpoch {
+    pub start_epoch: u64,
+    pub hb_epoch: Option<u64>,
+}
+
+impl Ord for DynamicEpoch {
+    fn cmp(&self, other: &DynamicEpoch) -> Ordering {
+        let (
+            DynamicEpoch {
+                start_epoch: s1,
+                hb_epoch: h1,
+            },
+            DynamicEpoch {
+                start_epoch: s2,
+                hb_epoch: h2,
+            },
+        ) = (self, other);
+        if s1 < s2 {
+            Ordering::Less
+        } else if s1 == s2 && h1 == h2 {
+            Ordering::Equal
+        } else {
+            Ordering::Greater
+        }
+    }
+}
+
+impl PartialOrd for DynamicEpoch {
+    fn partial_cmp(&self, other: &DynamicEpoch) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl DynamicEpoch {
+    pub fn new(start_epoch: u64, hb_epoch: Option<u64>) -> Self {
+        DynamicEpoch {
+            start_epoch,
+            hb_epoch,
+        }
+    }
+
+    pub fn from_start_epoch(start_epoch: u64) -> Self {
+        DynamicEpoch {
+            start_epoch,
+            hb_epoch: None,
+        }
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.start_epoch + self.hb_epoch.unwrap_or(0)
     }
 }
 
@@ -134,21 +196,21 @@ pub enum Message<N: Rand> {
     /// A Dynamic Honey Badger participant uses this message to announce its transition to the given
     /// epoch. This message informs the recipients that this participant now accepts messages for
     /// this epoch only and drops any incoming messages from earlier or later epochs.
-    EpochStarted(u64),
+    DynamicEpochStarted(DynamicEpoch),
 }
 
 impl<N: Rand> Message<N> {
     fn start_epoch(&self) -> u64 {
         match *self {
             Message::DynamicHoneyBadger(ref content) => content.start_epoch(),
-            Message::EpochStarted(epoch) => epoch,
+            Message::DynamicEpochStarted(epoch) => epoch.start_epoch,
         }
     }
 
-    pub fn epoch(&self) -> u64 {
+    pub fn epoch(&self) -> DynamicEpoch {
         match *self {
             Message::DynamicHoneyBadger(ref content) => content.epoch(),
-            Message::EpochStarted(epoch) => epoch,
+            Message::DynamicEpochStarted(epoch) => epoch,
         }
     }
 }

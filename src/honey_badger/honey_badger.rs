@@ -184,12 +184,12 @@ where
         if epoch < self.epoch || epoch > self.epoch + self.max_future_epochs {
             // Reject messages from past epochs or from future epochs that are not in the range yet.
             warn!(
-                "{:?}@{} discarded {:?}:{:?}@{}",
+                "{:?}@{} discarded {:?}@{}:{:?}",
                 self.netinfo.our_id(),
                 self.epoch,
                 sender_id,
+                epoch,
                 content,
-                epoch
             );
             return Ok(Fault::new(sender_id.clone(), FaultKind::EpochOutOfRange).into());
         }
