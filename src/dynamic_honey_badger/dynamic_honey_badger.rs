@@ -149,10 +149,11 @@ where
             }
         }?;
         debug!(
-            "{:?}@{} outgoing DHB messages {:?} --- queued messages: {:?} --- remote epochs: {:?}",
+            "{:?}@{} outgoing DHB messages {:?} --- queued DHB messages: {:?} --- queued HB messages: {:?} --- remote epochs: {:?}",
             self.netinfo.our_id(),
             self.start_epoch,
             step.messages,
+            self.outgoing_queue_dhb,
             self.outgoing_queue_hb,
             self.remote_epochs
         );
@@ -243,6 +244,13 @@ where
         sender_id: &N,
         epoch: DynamicEpoch,
     ) -> Result<Step<C, N>> {
+        debug!(
+            "{:?}@{} received epoch {:?}@{:?}",
+            self.netinfo.our_id(),
+            self.start_epoch,
+            sender_id,
+            epoch,
+        );
         let mut obsolete = false;
         self.remote_epochs
             .entry(sender_id.clone())
@@ -433,14 +441,18 @@ where
         Ok(FaultLog::default())
     }
 
-    /// Processes all pending batches output by Honey Badger.
+    /// Processes all pending batches output by Honey Badger and annotates epoch update
+    /// announcements with the Dynamic Honey Badger start epoch.
     pub(super) fn process_output(
         &mut self,
         hb_step: honey_badger::Step<InternalContrib<C, N>, N>,
     ) -> Result<Step<C, N>> {
         let mut step: Step<C, N> = Step::default();
-        let output = step.extend_with(hb_step, |hb_msg| {
-            Message::DynamicHoneyBadger(MessageContent::HoneyBadger(self.start_epoch, hb_msg))
+        let output = step.extend_with(hb_step, |hb_msg| match hb_msg {
+            HbMessage::EpochStarted(hb_epoch) => {
+                Message::DynamicEpochStarted(DynamicEpoch::new(self.start_epoch, hb_epoch))
+            }
+            msg => Message::DynamicHoneyBadger(MessageContent::HoneyBadger(self.start_epoch, msg)),
         });
         for hb_batch in output {
             // Create the batch we output ourselves. It will contain the _user_ transactions of

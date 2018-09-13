@@ -62,7 +62,6 @@ mod dynamic_honey_badger;
 mod error;
 mod votes;
 
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use crypto::{PublicKey, PublicKeySet, Signature};
@@ -146,38 +145,10 @@ impl<N: Rand> MessageContent<N> {
 
 /// The detailed epoch of `DynamicHoneyBadger` consisting of the epoch after the last restart of the
 /// `HoneyBadger` instance and the current epoch of that instance.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DynamicEpoch {
     pub start_epoch: u64,
     pub hb_epoch: u64,
-}
-
-impl Ord for DynamicEpoch {
-    fn cmp(&self, other: &DynamicEpoch) -> Ordering {
-        let (
-            DynamicEpoch {
-                start_epoch: s1,
-                hb_epoch: h1,
-            },
-            DynamicEpoch {
-                start_epoch: s2,
-                hb_epoch: h2,
-            },
-        ) = (self, other);
-        if s1 < s2 {
-            Ordering::Less
-        } else if s1 == s2 && h1 == h2 {
-            Ordering::Equal
-        } else {
-            Ordering::Greater
-        }
-    }
-}
-
-impl PartialOrd for DynamicEpoch {
-    fn partial_cmp(&self, other: &DynamicEpoch) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
 }
 
 impl DynamicEpoch {
