@@ -300,4 +300,9 @@ where
             Entry::Vacant(entry) => entry.insert(EpochState::new(self.netinfo.clone(), epoch)?),
         })
     }
+
+    /// Provides a reference to the the queue of outgoing messages.
+    pub(crate) fn outgoing_queue(&mut self) -> &mut BTreeMap<(N, u64), Vec<Message<N>>> {
+        &mut self.outgoing_queue
+    }
 }

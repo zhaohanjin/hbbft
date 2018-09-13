@@ -1,3 +1,4 @@
+use std::collections::btree_map;
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 use std::sync::Arc;
@@ -448,12 +449,7 @@ where
         hb_step: honey_badger::Step<InternalContrib<C, N>, N>,
     ) -> Result<Step<C, N>> {
         let mut step: Step<C, N> = Step::default();
-        let output = step.extend_with(hb_step, |hb_msg| match hb_msg {
-            HbMessage::EpochStarted(hb_epoch) => {
-                Message::DynamicEpochStarted(DynamicEpoch::new(self.start_epoch, hb_epoch))
-            }
-            msg => Message::DynamicHoneyBadger(MessageContent::HoneyBadger(self.start_epoch, msg)),
-        });
+        let output = step.extend_with(hb_step, |hb_msg| map_hb_message(hb_msg, self.start_epoch));
         for hb_batch in output {
             // Create the batch we output ourselves. It will contain the _user_ transactions of
             // `hb_batch`, and the current change state.
@@ -537,8 +533,30 @@ where
         Ok(step)
     }
 
+    /// Moves queued messages from HB to DHB.
+    fn move_queued_hb_messages(&mut self) {
+        for (key, hb_msgs) in self.honey_badger.outgoing_queue() {
+            let (id, hb_epoch) = key;
+            for hb_msg in hb_msgs.drain(..) {
+                let msg = map_hb_message(hb_msg, self.start_epoch);
+                let e = self
+                    .outgoing_queue_hb
+                    .entry((id.clone(), DynamicEpoch::new(self.start_epoch, *hb_epoch)));
+                match e {
+                    btree_map::Entry::Occupied(e) => {
+                        e.into_mut().push(msg);
+                    }
+                    btree_map::Entry::Vacant(e) => {
+                        e.insert(vec![msg]);
+                    }
+                }
+            }
+        }
+    }
+
     /// Starts a new `HoneyBadger` instance and resets the vote counter.
     fn restart_honey_badger(&mut self, epoch: u64) -> Result<Step<C, N>> {
+        self.move_queued_hb_messages();
         self.start_epoch = epoch;
         self.key_gen_msg_buffer.retain(|kg_msg| kg_msg.0 >= epoch);
         let netinfo = Arc::new(self.netinfo.clone());
@@ -622,5 +640,18 @@ where
         };
         let pk_opt = self.netinfo.public_key(node_id).or_else(get_candidate_key);
         Ok(pk_opt.map_or(false, |pk| pk.verify(&sig, ser)))
+    }
+}
+
+/// Maps HB messages to DHB messages.
+fn map_hb_message<N>(hb_msg: honey_badger::Message<N>, start_epoch: u64) -> Message<N>
+where
+    N: Rand,
+{
+    match hb_msg {
+        HbMessage::EpochStarted(hb_epoch) => {
+            Message::DynamicEpochStarted(DynamicEpoch::new(start_epoch, hb_epoch))
+        }
+        msg => Message::DynamicHoneyBadger(MessageContent::HoneyBadger(start_epoch, msg)),
     }
 }
