@@ -62,7 +62,8 @@ where
             key_gen_msg_buffer: Vec::new(),
             honey_badger,
             key_gen_state: None,
-            outgoing_queue: BTreeMap::new(),
+            outgoing_queue_hb: BTreeMap::new(),
+            outgoing_queue_dhb: BTreeMap::new(),
             remote_epochs: BTreeMap::new(),
         };
         let step = dhb.process_output(hb_step)?;
@@ -109,7 +110,8 @@ where
             key_gen_msg_buffer: Vec::new(),
             honey_badger,
             key_gen_state: None,
-            outgoing_queue: BTreeMap::new(),
+            outgoing_queue_hb: BTreeMap::new(),
+            outgoing_queue_dhb: BTreeMap::new(),
             remote_epochs: BTreeMap::new(),
         };
         let mut step = dhb.process_output(hb_step)?;

@@ -35,10 +35,13 @@ pub struct DynamicHoneyBadger<C, N: Rand> {
     pub(super) honey_badger: HoneyBadger<InternalContrib<C, N>, N>,
     /// The current key generation process, and the change it applies to.
     pub(super) key_gen_state: Option<KeyGenState<N>>,
-    /// Messages that couldn't be handled yet by remote nodes. Each key to the map contains the
-    /// target node ID, the Dynamic Honey Badger start epoch and, if known, the embedded Honey
-    /// Badger epoch of a list of messages stored as the value of that key.
-    pub(super) outgoing_queue: BTreeMap<(N, DynamicEpoch), Vec<Message<N>>>,
+    /// `HoneyBadger` messages that couldn't be handled yet by remote nodes. Each key to the map
+    /// contains the target node ID, the Dynamic Honey Badger start epoch and the embedded Honey
+    /// Badger epoch of a vector of messages stored as the value of that key.
+    pub(super) outgoing_queue_hb: BTreeMap<(N, DynamicEpoch), Vec<Message<N>>>,
+    /// Messages created by `DynamicHoneyBadger` that cannot be handled yet by remove nodes. The
+    /// keys are pairs of the node ID and the start epoch.
+    pub(super) outgoing_queue_dhb: BTreeMap<(N, u64), Vec<Message<N>>>,
     /// Known current epochs of remote nodes.
     pub(super) remote_epochs: BTreeMap<N, DynamicEpoch>,
 }
@@ -66,10 +69,11 @@ where
         let (mut passed_msgs, failed_msgs): (Vec<_>, Vec<_>) =
             messages.into_iter().partition(|msg| match &msg.message {
                 Message::DynamicHoneyBadger(ref content) => {
-                    let epoch = content.epoch();
+                    let dynamic_epoch = content.dynamic_epoch();
+                    let is_dynamic = content.is_dynamic();
                     let pass = |&e: &DynamicEpoch| {
-                        e.start_epoch == epoch.start_epoch
-                            && (e.hb_epoch == epoch.hb_epoch || epoch.hb_epoch == None)
+                        e.start_epoch == dynamic_epoch.start_epoch
+                            && (is_dynamic || e.hb_epoch == dynamic_epoch.hb_epoch)
                     };
                     match &msg.target {
                         Target::All => remote_epochs.values().all(pass),
@@ -87,10 +91,11 @@ where
         let remote_nodes: BTreeSet<&N> = remote_ids.collect();
         for msg in multicasts {
             let message = msg.message;
-            let epoch = message.epoch();
+            let dynamic_epoch = message.dynamic_epoch();
+            let is_dynamic = message.is_dynamic();
             let pass = |e: DynamicEpoch| {
-                e.start_epoch == epoch.start_epoch
-                    && (e.hb_epoch == epoch.hb_epoch || epoch.hb_epoch == None)
+                e.start_epoch == dynamic_epoch.start_epoch
+                    && (is_dynamic || e.hb_epoch == dynamic_epoch.hb_epoch)
             };
             let accepting_nodes: BTreeSet<&N> = remote_epochs
                 .iter()
@@ -148,7 +153,7 @@ where
             self.netinfo.our_id(),
             self.start_epoch,
             step.messages,
-            self.outgoing_queue,
+            self.outgoing_queue_hb,
             self.remote_epochs
         );
         Ok(step)
@@ -214,13 +219,20 @@ where
             &self.remote_epochs,
             self.netinfo.all_ids().filter(|&id| id != our_id),
         );
-        // Append the deferred messages onto the queue.
+        // Append the deferred messages onto the queues.
         for (id, message) in deferred_msgs {
-            let epoch = message.epoch();
-            self.outgoing_queue
-                .entry((id, epoch))
-                .and_modify(|e| e.push(message.clone()))
-                .or_insert_with(|| vec![message.clone()]);
+            let epoch = message.dynamic_epoch();
+            if message.is_dynamic() {
+                self.outgoing_queue_dhb
+                    .entry((id, epoch.start_epoch))
+                    .and_modify(|e| e.push(message.clone()))
+                    .or_insert_with(|| vec![message.clone()]);
+            } else {
+                self.outgoing_queue_hb
+                    .entry((id, epoch))
+                    .and_modify(|e| e.push(message.clone()))
+                    .or_insert_with(|| vec![message.clone()]);
+            }
         }
         Ok(step)
     }
@@ -231,73 +243,80 @@ where
         sender_id: &N,
         epoch: DynamicEpoch,
     ) -> Result<Step<C, N>> {
-        let mut duplicate = false;
+        let mut obsolete = false;
         self.remote_epochs
             .entry(sender_id.clone())
             .and_modify(|e| {
                 if *e < epoch {
                     // Increment the epoch.
                     *e = epoch;
-                } else if *e == epoch {
-                    duplicate = true;
+                } else if *e >= epoch {
+                    obsolete = true;
                 }
             }).or_insert(epoch);
-        if duplicate {
-            return Err(ErrorKind::DuplicateDynamicEpochStarted.into());
+        if obsolete {
+            return Err(ErrorKind::ObsoleteDynamicEpochStarted.into());
         }
-        // Remove all messages queued for the remote node from earlier epochs.
-        let earlier_keys: Vec<_> = self
-            .outgoing_queue
+        let step = self.process_new_epoch(sender_id, epoch);
+        self.remove_messages_upto(sender_id, epoch);
+        step
+    }
+
+    /// Processes an announcement of a new epoch update received from a remote node.
+    fn process_new_epoch(&mut self, sender_id: &N, epoch: DynamicEpoch) -> Result<Step<C, N>> {
+        if epoch.start_epoch == self.start_epoch {
+            // Forward `hb_epoch` to `HoneyBadger` if the `DynamicHoneyBadger` start epochs
+            // match. Any queued messages are stored in the `HoneyBadger` instance.
+            let step = self
+                .honey_badger
+                .handle_message(sender_id, HbMessage::EpochStarted(epoch.hb_epoch))
+                .map_err(ErrorKind::DynamicEpochStarted)?;
+            self.process_output(step)
+        } else if epoch.start_epoch < self.start_epoch {
+            // Send any DHB messages for `epoch.start_epoch`.
+            let mut ready_messages = self
+                .outgoing_queue_dhb
+                .remove(&(sender_id.clone(), epoch.start_epoch))
+                .unwrap_or(vec![]);
+            // Send any HB messages for `epoch`.
+            ready_messages.extend(
+                self.outgoing_queue_hb
+                    .remove(&(sender_id.clone(), epoch))
+                    .unwrap_or(vec![]),
+            );
+            Ok(Step::from(
+                ready_messages
+                    .into_iter()
+                    .map(|msg| Target::Node(sender_id.clone()).message(msg)),
+            ))
+        } else {
+            // `epoch.start_epoch` is in the future.
+            Ok(Step::default())
+        }
+    }
+
+    /// Removes all messages queued for the remote node from epochs upto `epoch`.
+    fn remove_messages_upto(&mut self, sender_id: &N, epoch: DynamicEpoch) {
+        let earlier_keys_hb: Vec<_> = self
+            .outgoing_queue_hb
             .keys()
             .cloned()
             .filter(|(id, e)| {
                 id == sender_id
                     && (e.start_epoch < epoch.start_epoch
-                        || (e.start_epoch == epoch.start_epoch
-                            && e.hb_epoch.is_some()
-                            && e.hb_epoch < epoch.hb_epoch))
+                        || (e.start_epoch == epoch.start_epoch && e.hb_epoch <= epoch.hb_epoch))
             }).collect();
-        for key in earlier_keys {
-            self.outgoing_queue.remove(&key);
+        for key in earlier_keys_hb {
+            self.outgoing_queue_hb.remove(&key);
         }
-
-        if epoch.start_epoch == self.start_epoch {
-            if let Some(hb_epoch) = epoch.hb_epoch {
-                // Forward `hb_epoch` to `HoneyBadger` if the `DynamicHoneyBadger` start epochs match.
-                let step = self
-                    .honey_badger
-                    .handle_message(sender_id, HbMessage::EpochStarted(hb_epoch))
-                    .map_err(ErrorKind::DynamicEpochStarted)?;
-                self.process_output(step)
-            } else {
-                Ok(Step::default())
-            }
-        } else if epoch.start_epoch < self.start_epoch {
-            // Send any messages for `DynamicEpoch::new(epoch.start_epoch, None)`.
-            let mut step = if let Some(messages) = self.outgoing_queue.remove(&(
-                sender_id.clone(),
-                DynamicEpoch::new(epoch.start_epoch, None),
-            )) {
-                Step::from(
-                    messages
-                        .into_iter()
-                        .map(|msg| Target::Node(sender_id.clone()).message(msg)),
-                )
-            } else {
-                Step::default()
-            };
-            // If there are any messages to `sender_id` for `epoch`, send them now.
-            if let Some(messages) = self.outgoing_queue.remove(&(sender_id.clone(), epoch)) {
-                step.extend(Step::from(
-                    messages
-                        .into_iter()
-                        .map(|msg| Target::Node(sender_id.clone()).message(msg)),
-                ));
-            }
-            Ok(step)
-        } else {
-            // `epoch.start_epoch` is in the future.
-            Ok(Step::default())
+        let earlier_keys_dhb: Vec<_> = self
+            .outgoing_queue_dhb
+            .keys()
+            .cloned()
+            .filter(|(id, e)| id == sender_id && *e <= epoch.start_epoch)
+            .collect();
+        for key in earlier_keys_dhb {
+            self.outgoing_queue_dhb.remove(&key);
         }
     }
 
@@ -420,9 +439,8 @@ where
         hb_step: honey_badger::Step<InternalContrib<C, N>, N>,
     ) -> Result<Step<C, N>> {
         let mut step: Step<C, N> = Step::default();
-        let start_epoch = self.start_epoch;
         let output = step.extend_with(hb_step, |hb_msg| {
-            Message::DynamicHoneyBadger(MessageContent::HoneyBadger(start_epoch, hb_msg))
+            Message::DynamicHoneyBadger(MessageContent::HoneyBadger(self.start_epoch, hb_msg))
         });
         for hb_batch in output {
             // Create the batch we output ourselves. It will contain the _user_ transactions of

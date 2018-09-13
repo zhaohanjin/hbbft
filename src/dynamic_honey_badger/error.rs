@@ -31,8 +31,8 @@ pub enum ErrorKind {
     SyncKeyGen(sync_key_gen::Error),
     #[fail(display = "DynamicEpochStarted error: {}", _0)]
     DynamicEpochStarted(honey_badger::Error),
-    #[fail(display = "Duplicate `DynamicEpochStarted`")]
-    DuplicateDynamicEpochStarted,
+    #[fail(display = "Obsolete `DynamicEpochStarted`")]
+    ObsoleteDynamicEpochStarted,
 }
 
 /// A dynamic honey badger error.
