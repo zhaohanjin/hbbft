@@ -449,7 +449,7 @@ where
         hb_step: honey_badger::Step<InternalContrib<C, N>, N>,
     ) -> Result<Step<C, N>> {
         let mut step: Step<C, N> = Step::default();
-        let output = step.extend_with(hb_step, |hb_msg| map_hb_message(hb_msg, self.start_epoch));
+        let output = step.extend_with(hb_step, |hb_msg| from_hb_message(hb_msg, self.start_epoch));
         for hb_batch in output {
             // Create the batch we output ourselves. It will contain the _user_ transactions of
             // `hb_batch`, and the current change state.
@@ -533,12 +533,12 @@ where
         Ok(step)
     }
 
-    /// Moves queued messages from HB to DHB.
+    /// Moves queued messages from Honey Badger to Dynamic Honey Badger.
     fn move_queued_hb_messages(&mut self) {
         for (key, hb_msgs) in self.honey_badger.outgoing_queue() {
             let (id, hb_epoch) = key;
             for hb_msg in hb_msgs.drain(..) {
-                let msg = map_hb_message(hb_msg, self.start_epoch);
+                let msg = from_hb_message(hb_msg, self.start_epoch);
                 let e = self
                     .outgoing_queue_hb
                     .entry((id.clone(), DynamicEpoch::new(self.start_epoch, *hb_epoch)));
@@ -608,7 +608,7 @@ where
     ///
     /// We require the minimum number of completed proposals (`SyncKeyGen::is_ready`) and if a new
     /// node is joining, we require in addition that the new node's proposal is complete. That way
-    /// the new node knows that it's key is secret, without having to trust any number of nodes.
+    /// the new node knows that its key is secret, without having to trust any number of nodes.
     fn take_ready_key_gen(&mut self) -> Option<KeyGenState<N>> {
         if self
             .key_gen_state
@@ -644,7 +644,7 @@ where
 }
 
 /// Maps HB messages to DHB messages.
-fn map_hb_message<N>(hb_msg: honey_badger::Message<N>, start_epoch: u64) -> Message<N>
+fn from_hb_message<N>(hb_msg: honey_badger::Message<N>, start_epoch: u64) -> Message<N>
 where
     N: Rand,
 {
