@@ -273,35 +273,32 @@ where
 
     /// Processes an announcement of a new epoch update received from a remote node.
     fn process_new_epoch(&mut self, sender_id: &N, epoch: DynamicEpoch) -> Result<Step<C, N>> {
+        // Send any DHB messages for `epoch.start_epoch`.
+        let mut ready_messages = self
+            .outgoing_queue_dhb
+            .remove(&(sender_id.clone(), epoch.start_epoch))
+            .unwrap_or(vec![]);
+        // Send any HB messages for `epoch`.
+        ready_messages.extend(
+            self.outgoing_queue_hb
+                .remove(&(sender_id.clone(), epoch))
+                .unwrap_or(vec![]),
+        );
+        let mut step = Step::from(
+            ready_messages
+                .into_iter()
+                .map(|msg| Target::Node(sender_id.clone()).message(msg)),
+        );
         if epoch.start_epoch == self.start_epoch {
             // Forward `hb_epoch` to `HoneyBadger` if the `DynamicHoneyBadger` start epochs
             // match. Any queued messages are stored in the `HoneyBadger` instance.
-            let step = self
+            let hb_step = self
                 .honey_badger
                 .handle_message(sender_id, HbMessage::EpochStarted(epoch.hb_epoch))
                 .map_err(ErrorKind::DynamicEpochStarted)?;
-            self.process_output(step)
-        } else if epoch.start_epoch < self.start_epoch {
-            // Send any DHB messages for `epoch.start_epoch`.
-            let mut ready_messages = self
-                .outgoing_queue_dhb
-                .remove(&(sender_id.clone(), epoch.start_epoch))
-                .unwrap_or(vec![]);
-            // Send any HB messages for `epoch`.
-            ready_messages.extend(
-                self.outgoing_queue_hb
-                    .remove(&(sender_id.clone(), epoch))
-                    .unwrap_or(vec![]),
-            );
-            Ok(Step::from(
-                ready_messages
-                    .into_iter()
-                    .map(|msg| Target::Node(sender_id.clone()).message(msg)),
-            ))
-        } else {
-            // `epoch.start_epoch` is in the future.
-            Ok(Step::default())
+            step.extend(self.process_output(hb_step)?);
         }
+        Ok(step)
     }
 
     /// Removes all messages queued for the remote node from epochs upto `epoch`.
