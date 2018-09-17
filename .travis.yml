@@ -27,15 +27,17 @@ before_install:
 env:
   global:
     - RUST_BACKTRACE=1
-    - RUSTFLAGS="-D warnings"
+    # Enables additional cpu-specific optimizations.
+    - RUSTFLAGS="-D warnings -C target-cpu=native"
     # Note: `beta` should be removed along with `RUST_NEXT` after the 1.28
     #       stable release on 2018-09-13.
     - RUST_NEXT=beta
     - MLOCK_SECRETS=false
 script:
-  - cargo +${RUST_NEXT} clippy -- --deny clippy
-  - cargo +${RUST_NEXT} clippy --tests --examples -- --deny clippy
-  - cargo +${RUST_NEXT} clippy --all-features -- --deny clippy
-  - cargo +${RUST_NEXT} clippy --all-features --tests -- --deny clippy
+  # Clippy is disabled until the switch to stable.
+  # - cargo +${RUST_NEXT} clippy -- --deny clippy
+  # - cargo +${RUST_NEXT} clippy --tests --examples -- --deny clippy
+  # - cargo +${RUST_NEXT} clippy --all-features -- --deny clippy
+  # - cargo +${RUST_NEXT} clippy --all-features --tests -- --deny clippy
   - cargo +${RUST_NEXT} fmt -- --check
-  - cargo test --all-features --release
+  - cargo test --all-features --release -- --test-threads 1

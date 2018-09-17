@@ -14,11 +14,12 @@
 
 pub mod adversary;
 pub mod err;
+pub mod proptest;
 #[macro_use]
 pub mod util;
 
 use std::io::Write;
-use std::{cmp, collections, env, fs, io, ops, process};
+use std::{cmp, collections, env, fmt, fs, io, ops, process, time};
 
 use rand;
 use rand::Rand;
@@ -28,6 +29,9 @@ use hbbft::messaging::{self, DistAlgorithm, NetworkInfo, Step};
 
 pub use self::adversary::Adversary;
 pub use self::err::CrankError;
+
+/// The time limit for any network if none was specified.
+const DEFAULT_TIME_LIMIT: Option<time::Duration> = Some(time::Duration::from_secs(60 * 20));
 
 /// Helper macro for tracing.
 ///
@@ -59,7 +63,6 @@ fn open_trace() -> Result<io::BufWriter<fs::File>, io::Error> {
 }
 
 /// A node in the test network.
-#[derive(Debug)]
 pub struct Node<D: DistAlgorithm> {
     /// Algorithm instance of node.
     algorithm: D,
@@ -67,6 +70,19 @@ pub struct Node<D: DistAlgorithm> {
     is_faulty: bool,
     /// Captured algorithm outputs, in order.
     outputs: Vec<D::Output>,
+}
+
+impl<D> fmt::Debug for Node<D>
+where
+    D: DistAlgorithm,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Node")
+            .field("algorithm", &"yes")
+            .field("is_faulty", &self.is_faulty)
+            .field("outputs", &self.outputs.len())
+            .finish()
+    }
 }
 
 impl<D: DistAlgorithm> Node<D> {
@@ -256,6 +272,25 @@ where
     crank_limit: Option<usize>,
     /// Optional message limit.
     message_limit: Option<usize>,
+    /// Optional time limit.
+    time_limit: Option<time::Duration>,
+}
+
+impl<D, I> fmt::Debug for NetBuilder<D, I>
+where
+    D: DistAlgorithm,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("NetBuilder")
+            .field("node_ids", &())
+            .field("num_faulty", &self.num_faulty)
+            .field("cons", &self.cons.is_some())
+            .field("adversary", &self.cons.is_some())
+            .field("trace", &self.trace)
+            .field("crank_limit", &self.crank_limit)
+            .field("message_limit", &self.message_limit)
+            .finish()
+    }
 }
 
 impl<D, I> NetBuilder<D, I>
@@ -283,6 +318,7 @@ where
             trace: None,
             crank_limit: None,
             message_limit: None,
+            time_limit: DEFAULT_TIME_LIMIT,
         }
     }
 
@@ -300,7 +336,7 @@ where
 
     /// Set a crank limit.
     ///
-    /// Crank limits are useful to limit execution time and reign in adversary. Otherwise, message
+    /// Crank limits are useful to limit execution time and rein in adversary. Otherwise, message
     /// limits are typically more useful. After the limit is hit, any call to `crank` will return a
     /// `CrankError::CrankLimitExceeded`.
     #[inline]
@@ -320,12 +356,31 @@ where
         self
     }
 
+    /// Remove the time limit.
+    ///
+    /// Removes any time limit from the builder.
+    #[inline]
+    pub fn no_time_limit(mut self) -> Self {
+        self.time_limit = None;
+        self
+    }
+
     /// Number of faulty nodes.
     ///
     /// Indicates the number of nodes that should be marked faulty.
     #[inline]
     pub fn num_faulty(mut self, num_faulty: usize) -> Self {
         self.num_faulty = num_faulty;
+        self
+    }
+
+    /// Time limit.
+    ///
+    /// Sets the time limit; `crank` will fail if called after this much time as elapsed since
+    /// the network was instantiated.
+    #[inline]
+    pub fn time_limit(mut self, limit: time::Duration) -> Self {
+        self.time_limit = Some(limit);
         self
     }
 
@@ -372,6 +427,20 @@ where
     /// If the total number of nodes is not `> 3 * num_faulty`, construction will panic.
     #[inline]
     pub fn build(self) -> Result<VirtualNet<D>, crypto::error::Error> {
+        // The time limit can be overriden through environment variables:
+        let override_time_limit = env::var("HBBFT_NO_TIME_LIMIT")
+            // We fail early, to avoid tricking the user into thinking that they have set the time
+            // limit when they haven't.
+            .map(|s| s.parse().expect("could not parse `HBBFT_NO_TIME_LIMIT`"))
+            .unwrap_or(false);
+
+        let time_limit = if override_time_limit {
+            eprintln!("WARNING: The time limit for individual tests has been manually disabled through `HBBFT_NO_TIME_LIMIT`.");
+            None
+        } else {
+            self.time_limit
+        };
+
         let cons = self
             .cons
             .as_ref()
@@ -397,6 +466,7 @@ where
 
         net.crank_limit = self.crank_limit;
         net.message_limit = self.message_limit;
+        net.time_limit = time_limit;
 
         Ok(net)
     }
@@ -426,6 +496,28 @@ where
     message_count: usize,
     /// The limit set for the number of messages.
     message_limit: Option<usize>,
+    /// Limits the maximum running time between construction and last call to `crank()`.
+    time_limit: Option<time::Duration>,
+    /// The instant the network was created.
+    start_time: time::Instant,
+}
+
+impl<D> fmt::Debug for VirtualNet<D>
+where
+    D: DistAlgorithm,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("VirtualNet")
+            .field("nodes", &self.nodes.len())
+            .field("messages", &self.messages)
+            .field("adversary", &self.adversary.is_some())
+            .field("trace", &self.trace.is_some())
+            .field("crank_count", &self.crank_count)
+            .field("crank_limit", &self.crank_limit)
+            .field("message_count", &self.message_count)
+            .field("message_limit", &self.message_limit)
+            .finish()
+    }
 }
 
 /// A virtual network
@@ -605,6 +697,8 @@ where
             crank_limit: None,
             message_count,
             message_limit: None,
+            time_limit: None,
+            start_time: time::Instant::now(),
         })
     }
 
@@ -676,6 +770,12 @@ where
         if let Some(limit) = self.message_limit {
             if self.message_count >= limit {
                 return Some(Err(CrankError::MessageLimitExceeded(limit)));
+            }
+        }
+
+        if let Some(limit) = self.time_limit {
+            if time::Instant::now().duration_since(self.start_time) > limit {
+                return Some(Err(CrankError::TimeLimitHit(limit)));
             }
         }
 
