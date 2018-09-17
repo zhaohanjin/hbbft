@@ -61,21 +61,27 @@ where
         &mut self,
         remote_epochs: &'i BTreeMap<N, DynamicEpoch>,
         remote_ids: I,
-    ) -> impl Iterator<Item = (N, Message<N>)>
+    ) -> impl Iterator<Item = (N, Message<N>)> + 'i
     where
         I: 'i + Iterator<Item = &'i N>,
         N: 'i,
     {
+        let accepts = |us: DynamicEpoch, is_dynamic: bool, them: DynamicEpoch| {
+            them.start_epoch == us.start_epoch && (is_dynamic || them.hb_epoch == us.hb_epoch)
+        };
+        let is_early = |us: DynamicEpoch, is_dynamic: bool, them: DynamicEpoch| {
+            them.start_epoch > us.start_epoch
+                || (them.start_epoch == us.start_epoch
+                    && !is_dynamic
+                    && them.hb_epoch > us.hb_epoch)
+        };
         let messages: Vec<_> = self.messages.drain(..).collect();
         let (mut passed_msgs, failed_msgs): (Vec<_>, Vec<_>) =
             messages.into_iter().partition(|msg| match &msg.message {
                 Message::DynamicHoneyBadger(ref content) => {
                     let dynamic_epoch = content.dynamic_epoch();
                     let is_dynamic = content.is_dynamic();
-                    let pass = |&e: &DynamicEpoch| {
-                        e.start_epoch == dynamic_epoch.start_epoch
-                            && (is_dynamic || e.hb_epoch == dynamic_epoch.hb_epoch)
-                    };
+                    let pass = |&them: &DynamicEpoch| accepts(dynamic_epoch, is_dynamic, them);
                     match &msg.target {
                         Target::All => remote_epochs.values().all(pass),
                         Target::Node(id) => remote_epochs.get(&id).map_or(false, pass),
@@ -94,29 +100,50 @@ where
             let message = msg.message;
             let dynamic_epoch = message.dynamic_epoch();
             let is_dynamic = message.is_dynamic();
-            let pass = |e: DynamicEpoch| {
-                e.start_epoch == dynamic_epoch.start_epoch
-                    && (is_dynamic || e.hb_epoch == dynamic_epoch.hb_epoch)
+            let isnt_late = |&them: &DynamicEpoch| {
+                accepts(dynamic_epoch, is_dynamic, them)
+                    || is_early(dynamic_epoch, is_dynamic, them)
             };
+            let accepts = |&them: &DynamicEpoch| accepts(dynamic_epoch, is_dynamic, them);
             let accepting_nodes: BTreeSet<&N> = remote_epochs
                 .iter()
-                .filter(|(_, &e)| pass(e))
+                .filter(|(_, them)| accepts(them))
+                .map(|(id, _)| id)
+                .collect();
+            let non_late_nodes: BTreeSet<&N> = remote_epochs
+                .iter()
+                .filter(|(_, them)| isnt_late(them))
                 .map(|(id, _)| id)
                 .collect();
             for &id in &accepting_nodes {
                 passed_msgs.push(Target::Node(id.clone()).message(message.clone()));
             }
-            let rejecting_nodes = remote_nodes.difference(&accepting_nodes);
-            for &id in rejecting_nodes {
+            let late_nodes = remote_nodes.difference(&non_late_nodes);
+            for &id in late_nodes {
                 deferred_msgs.push(Target::Node(id.clone()).message(message.clone()));
             }
         }
         self.messages.extend(passed_msgs);
+        // Remove any messages to nodes with later epochs from the deferred messages.
+        let deferred_msgs: Vec<_> = deferred_msgs
+            .into_iter()
+            .filter(|msg| match msg.message {
+                Message::DynamicHoneyBadger(ref content) => {
+                    let dynamic_epoch = content.dynamic_epoch();
+                    let is_dynamic = content.is_dynamic();
+                    let pass = |&them: &DynamicEpoch| !is_early(dynamic_epoch, is_dynamic, them);
+                    match &msg.target {
+                        Target::All => panic!("A multicast message is deferred, #1"),
+                        Target::Node(id) => remote_epochs.get(&id).map_or(false, pass),
+                    }
+                }
+                Message::DynamicEpochStarted(_) => panic!("`DynamicEpochStarted` is deferred"),
+            }).collect();
         deferred_msgs.into_iter().map(|msg| {
             if let Target::Node(id) = msg.target {
                 (id, msg.message)
             } else {
-                panic!("`defer_messages` failed");
+                panic!("A multicast message is deferred, #2");
             }
         })
     }
