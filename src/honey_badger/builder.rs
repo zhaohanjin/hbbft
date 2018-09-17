@@ -16,6 +16,8 @@ where
 {
     /// Shared network data.
     netinfo: Arc<NetworkInfo<N>>,
+    /// Start in this epoch.
+    epoch: u64,
     /// The maximum number of future epochs for which we handle messages simultaneously.
     max_future_epochs: usize,
     _phantom: PhantomData<C>,
@@ -31,9 +33,16 @@ where
     pub fn new(netinfo: Arc<NetworkInfo<N>>) -> Self {
         HoneyBadgerBuilder {
             netinfo,
+            epoch: 0,
             max_future_epochs: 3,
             _phantom: PhantomData,
         }
+    }
+
+    /// Sets the starting epoch to the given value.
+    pub fn epoch(&mut self, epoch: u64) -> &mut Self {
+        self.epoch = epoch;
+        self
     }
 
     /// Sets the maximum number of future epochs for which we handle messages simultaneously.
@@ -45,9 +54,10 @@ where
     /// Creates a new Honey Badger instance in epoch 0 and makes the initial `Step` on that
     /// instance.
     pub fn build(&self) -> (HoneyBadger<C, N>, Step<C, N>) {
+        let epoch = self.epoch;
         let hb = HoneyBadger {
             netinfo: self.netinfo.clone(),
-            epoch: 0,
+            epoch,
             has_input: false,
             epochs: BTreeMap::new(),
             max_future_epochs: self.max_future_epochs as u64,
@@ -56,7 +66,7 @@ where
         };
         let step = if self.netinfo.is_validator() {
             // The first message in an epoch announces the epoch transition.
-            Target::All.message(Message::EpochStarted(0)).into()
+            Target::All.message(Message::EpochStarted(epoch)).into()
         } else {
             Step::default()
         };
