@@ -54,7 +54,7 @@ where
     C: Contribution + Serialize + for<'r> Deserialize<'r>,
     N: NodeIdT + Serialize + for<'r> Deserialize<'r> + Rand,
 {
-    /// Removes and returns any messages that are not accepted by remote nodes according to the
+    /// Removes and returns any messages that are not yet accepted by remote nodes according to the
     /// mapping `remote_epochs`. This way the returned messages are postponed until later, and the
     /// remaining messages can be sent to remote nodes without delay.
     fn defer_messages<'i, I>(
@@ -92,12 +92,16 @@ where
         // `Target::All` messages contained in the result of the partitioning are analyzed further
         // and each split into two sets of point messages: those which can be sent without delay and
         // those which should be postponed.
-        let (multicasts, mut deferred_msgs): (Vec<_>, Vec<_>) = failed_msgs
-            .into_iter()
-            .partition(|msg| Target::All == msg.target);
+        let mut multicasts: Vec<Message<N>> = Vec::new();
+        let mut deferred_msgs: Vec<(N, Message<N>)> = Vec::new();
+        for msg in failed_msgs {
+            match msg.target {
+                Target::All => multicasts.push(msg.message),
+                Target::Node(id) => deferred_msgs.push((id, msg.message)),
+            }
+        }
         let remote_nodes: BTreeSet<&N> = remote_ids.collect();
-        for msg in multicasts {
-            let message = msg.message;
+        for message in multicasts {
             let dynamic_epoch = message.dynamic_epoch();
             let is_dynamic = message.is_dynamic();
             let isnt_late = |&them: &DynamicEpoch| {
@@ -120,32 +124,23 @@ where
             }
             let late_nodes = remote_nodes.difference(&non_late_nodes);
             for &id in late_nodes {
-                deferred_msgs.push(Target::Node(id.clone()).message(message.clone()));
+                deferred_msgs.push((id.clone(), message.clone()));
             }
         }
         self.messages.extend(passed_msgs);
         // Remove any messages to nodes with later epochs from the deferred messages.
         let deferred_msgs: Vec<_> = deferred_msgs
             .into_iter()
-            .filter(|msg| match msg.message {
+            .filter(|(id, message)| match message {
                 Message::DynamicHoneyBadger(ref content) => {
                     let dynamic_epoch = content.dynamic_epoch();
                     let is_dynamic = content.is_dynamic();
                     let pass = |&them: &DynamicEpoch| !is_early(dynamic_epoch, is_dynamic, them);
-                    match &msg.target {
-                        Target::All => panic!("A multicast message is deferred, #1"),
-                        Target::Node(id) => remote_epochs.get(&id).map_or(false, pass),
-                    }
+                    remote_epochs.get(&id).map_or(false, pass)
                 }
                 Message::DynamicEpochStarted(_) => panic!("`DynamicEpochStarted` is deferred"),
             }).collect();
-        deferred_msgs.into_iter().map(|msg| {
-            if let Target::Node(id) = msg.target {
-                (id, msg.message)
-            } else {
-                panic!("A multicast message is deferred, #2");
-            }
-        })
+        deferred_msgs.into_iter()
     }
 }
 
