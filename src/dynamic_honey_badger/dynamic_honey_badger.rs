@@ -61,19 +61,24 @@ where
         &mut self,
         remote_epochs: &'i BTreeMap<N, DynamicEpoch>,
         remote_ids: I,
+        max_future_epochs: usize,
     ) -> impl Iterator<Item = (N, Message<N>)> + 'i
     where
         I: 'i + Iterator<Item = &'i N>,
         N: 'i,
     {
+        let max_future_epochs = max_future_epochs as u64;
         let accepts = |us: DynamicEpoch, is_dynamic: bool, them: DynamicEpoch| {
-            them.start_epoch == us.start_epoch && (is_dynamic || them.hb_epoch == us.hb_epoch)
+            us.start_epoch == them.start_epoch
+                && (is_dynamic
+                    || (us.hb_epoch >= them.hb_epoch
+                        && us.hb_epoch <= them.hb_epoch + max_future_epochs))
         };
         let is_early = |us: DynamicEpoch, is_dynamic: bool, them: DynamicEpoch| {
-            them.start_epoch > us.start_epoch
+            us.start_epoch < them.start_epoch
                 || (them.start_epoch == us.start_epoch
                     && !is_dynamic
-                    && them.hb_epoch > us.hb_epoch)
+                    && us.hb_epoch < them.hb_epoch)
         };
         let messages: Vec<_> = self.messages.drain(..).collect();
         let (mut passed_msgs, failed_msgs): (Vec<_>, Vec<_>) =
@@ -242,6 +247,7 @@ where
         let deferred_msgs = step.defer_messages(
             &self.remote_epochs,
             self.netinfo.all_ids().filter(|&id| id != our_id),
+            self.max_future_epochs,
         );
         // Append the deferred messages onto the queues.
         for (id, message) in deferred_msgs {
