@@ -51,11 +51,13 @@ where
         I: 'i + Iterator<Item = &'i N>,
         N: 'i,
     {
+        let accepts = |us: u64, them: u64| them <= us && us <= them + max_future_epochs;
+        let is_early = |us: u64, them: u64| us < them;
         let messages: Vec<_> = self.messages.drain(..).collect();
         let (mut passed_msgs, failed_msgs): (Vec<_>, Vec<_>) =
             messages.into_iter().partition(|msg| match &msg.message {
                 Message::HoneyBadger { epoch, .. } => {
-                    let pass = |&e| e >= *epoch && *epoch <= e + max_future_epochs;
+                    let pass = |&them| accepts(*epoch, them);
                     match &msg.target {
                         Target::All => remote_epochs.values().all(pass),
                         Target::Node(id) => remote_epochs.get(&id).map_or(false, pass),
@@ -69,23 +71,36 @@ where
         let (multicasts, mut deferred_msgs): (Vec<_>, Vec<_>) = failed_msgs
             .into_iter()
             .partition(|msg| Target::All == msg.target);
-        let remote_nodes: BTreeSet<&N> = remote_ids.collect();
+        let remote_ids: BTreeSet<&N> = remote_ids.collect();
+        let known_remote_ids: BTreeSet<&N> = remote_epochs.iter().map(|(k, _)| k).collect();
+        let remote_nodes: BTreeSet<&N> = remote_ids.union(&known_remote_ids).cloned().collect();
         for msg in multicasts {
             let message = msg.message;
+            debug!("Filtered out broadcast: {:?}", message);
             let epoch = message.epoch();
-            let pass = |&&e| e >= epoch && epoch <= e + max_future_epochs;
+            let isnt_late = |&them: &u64| accepts(epoch, them) || is_early(epoch, them);
+            let accepts = |&them: &u64| accepts(epoch, them);
             let accepting_nodes: BTreeSet<&N> = remote_epochs
                 .iter()
-                .filter(|(_, e)| pass(e))
+                .filter(|(_, them)| accepts(them))
+                .map(|(id, _)| id)
+                .collect();
+            let non_late_nodes: BTreeSet<&N> = remote_epochs
+                .iter()
+                .filter(|(_, them)| isnt_late(them))
                 .map(|(id, _)| id)
                 .collect();
             for &id in &accepting_nodes {
                 passed_msgs.push(Target::Node(id.clone()).message(message.clone()));
             }
-            let rejecting_nodes = remote_nodes.difference(&accepting_nodes);
-            for &id in rejecting_nodes {
+            let late_nodes: BTreeSet<_> = remote_nodes.difference(&non_late_nodes).collect();
+            for &&id in &late_nodes {
                 deferred_msgs.push(Target::Node(id.clone()).message(message.clone()));
             }
+            debug!(
+                "Accepting nodes: {:?} --- Late nodes: {:?} --- All remote nodes: {:?}",
+                accepting_nodes, late_nodes, remote_nodes
+            );
         }
         self.messages.extend(passed_msgs);
         deferred_msgs.into_iter().map(|msg| {
