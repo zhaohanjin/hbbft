@@ -45,6 +45,9 @@ pub struct DynamicHoneyBadger<C, N: Rand> {
     pub(super) outgoing_queue_dhb: BTreeMap<(N, u64), Vec<Message<N>>>,
     /// Known current epochs of remote nodes.
     pub(super) remote_epochs: BTreeMap<N, DynamicEpoch>,
+    /// Nodes which are being added using a `Change::Add` command. The command is ongoing and hasn't
+    /// been finished yet.
+    pub(super) nodes_being_added: BTreeSet<N>,
 }
 
 pub type Step<C, N> = messaging::Step<DynamicHoneyBadger<C, N>>;
@@ -96,9 +99,7 @@ where
         // `Target::All` messages contained in the result of the partitioning are analyzed further
         // and each split into two sets of point messages: those which can be sent without delay and
         // those which should be postponed.
-        let remote_ids: BTreeSet<&N> = remote_ids.collect();
-        let known_remote_ids: BTreeSet<&N> = remote_epochs.iter().map(|(k, _)| k).collect();
-        let remote_nodes: BTreeSet<&N> = remote_ids.union(&known_remote_ids).cloned().collect();
+        let remote_nodes: BTreeSet<&N> = remote_ids.collect();
         let mut deferred_msgs: Vec<(N, Message<N>)> = Vec::new();
         for msg in failed_msgs {
             match msg.target {
@@ -125,7 +126,8 @@ where
                     for &id in &accepting_nodes {
                         passed_msgs.push(Target::Node(id.clone()).message(message.clone()));
                     }
-                    let late_nodes: BTreeSet<_> = remote_nodes.difference(&non_late_nodes).collect();
+                    let late_nodes: BTreeSet<_> =
+                        remote_nodes.difference(&non_late_nodes).collect();
                     // FIXME: remove second reference after removing debug output.
                     for &&id in &late_nodes {
                         deferred_msgs.push((id.clone(), message.clone()));
@@ -258,9 +260,15 @@ where
                 .map(FaultLog::into),
         }?;
         let our_id = self.netinfo.our_id();
+        let all_remote_validators = self
+            .netinfo
+            .all_ids()
+            .filter(|&id| id != our_id)
+            .into_iter();
+        let all_remote_nodes = all_remote_validators.chain(self.nodes_being_added.iter());
         let deferred_msgs = step.defer_messages(
             &self.remote_epochs,
-            self.netinfo.all_ids().filter(|&id| id != our_id),
+            all_remote_nodes,
             self.max_future_epochs as u64,
         );
         // Append the deferred messages onto the queues.
@@ -319,12 +327,12 @@ where
         let mut ready_messages = self
             .outgoing_queue_dhb
             .remove(&(sender_id.clone(), epoch.start_epoch))
-            .unwrap_or(vec![]);
+            .unwrap_or_else(|| vec![]);
         // Send any HB messages for `epoch`.
         ready_messages.extend(
             self.outgoing_queue_hb
                 .remove(&(sender_id.clone(), epoch))
-                .unwrap_or(vec![]),
+                .unwrap_or_else(|| vec![]),
         );
         let mut step = Step::from(
             ready_messages
@@ -529,7 +537,15 @@ where
 
             if let Some(kgs) = self.take_ready_key_gen() {
                 // If DKG completed, apply the change, restart Honey Badger, and inform the user.
-                debug!("{:?} DKG for {:?} complete!", self.our_id(), kgs.change);
+                debug!(
+                    "{:?}@{} DKG for {:?} complete!",
+                    self.our_id(),
+                    self.start_epoch,
+                    kgs.change
+                );
+                if let Change::Add(ref id, _) = kgs.change {
+                    self.nodes_being_added.remove(id);
+                }
                 self.netinfo = kgs.key_gen.into_network_info()?;
                 step.extend(self.restart_honey_badger(batch.epoch + 1)?);
                 batch.set_change(ChangeState::Complete(kgs.change), &self.netinfo);
@@ -549,12 +565,20 @@ where
         if self.key_gen_state.as_ref().map(|kgs| &kgs.change) == Some(change) {
             return Ok(Step::default()); // The change is the same as before. Continue DKG as is.
         }
-        debug!("{:?} Restarting DKG for {:?}.", self.our_id(), change);
+        debug!(
+            "{:?}@{} Restarting DKG for {:?}.",
+            self.our_id(),
+            self.start_epoch,
+            change
+        );
         // Use the existing key shares - with the change applied - as keys for DKG.
         let mut pub_keys = self.netinfo.public_key_map().clone();
         if match *change {
             Change::Remove(ref id) => pub_keys.remove(id).is_none(),
-            Change::Add(ref id, ref pk) => pub_keys.insert(id.clone(), pk.clone()).is_some(),
+            Change::Add(ref id, ref pk) => {
+                self.nodes_being_added.insert(id.clone());
+                pub_keys.insert(id.clone(), pk.clone()).is_some()
+            }
         } {
             info!("{:?} No-op change: {:?}", self.our_id(), change);
         }

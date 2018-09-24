@@ -71,9 +71,7 @@ where
         let (multicasts, mut deferred_msgs): (Vec<_>, Vec<_>) = failed_msgs
             .into_iter()
             .partition(|msg| Target::All == msg.target);
-        let remote_ids: BTreeSet<&N> = remote_ids.collect();
-        let known_remote_ids: BTreeSet<&N> = remote_epochs.iter().map(|(k, _)| k).collect();
-        let remote_nodes: BTreeSet<&N> = remote_ids.union(&known_remote_ids).cloned().collect();
+        let remote_nodes: BTreeSet<&N> = remote_ids.collect();
         for msg in multicasts {
             let message = msg.message;
             debug!("Filtered out broadcast: {:?}", message);
@@ -244,7 +242,7 @@ where
             .outgoing_queue
             .keys()
             .cloned()
-            .filter(|(id, e)| id == sender_id && e < &epoch)
+            .filter(|(id, e)| id == sender_id && *e < epoch)
             .collect();
         for key in earlier_keys {
             self.outgoing_queue.remove(&key);

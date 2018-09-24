@@ -198,10 +198,7 @@ where
                 self.netinfo.our_id(),
                 {
                     let decrypted: BTreeSet<N> = plaintexts.keys().cloned().collect();
-                    let diff: Vec<N> = proposer_ids
-                        .difference(&decrypted)
-                        .cloned()
-                        .collect();
+                    let diff: Vec<N> = proposer_ids.difference(&decrypted).cloned().collect();
                     diff
                 }
             );

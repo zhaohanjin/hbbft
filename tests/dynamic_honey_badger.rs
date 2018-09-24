@@ -153,11 +153,11 @@ where
     }
 }
 
-// #[test]
-// fn test_dynamic_honey_badger_random_delivery_silent() {
-//     let new_adversary = |_: usize, _: usize, _| SilentAdversary::new(MessageScheduler::Random);
-//     test_dynamic_honey_badger_different_sizes(new_adversary, 10);
-// }
+#[test]
+fn test_dynamic_honey_badger_random_delivery_silent() {
+    let new_adversary = |_: usize, _: usize, _| SilentAdversary::new(MessageScheduler::Random);
+    test_dynamic_honey_badger_different_sizes(new_adversary, 10);
+}
 
 #[test]
 fn test_dynamic_honey_badger_first_delivery_silent() {
