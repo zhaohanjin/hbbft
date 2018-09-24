@@ -5,7 +5,8 @@ authors = ["Vladimir Komendantskiy <komendantsky@gmail.com>",
            "Andreas Fackler <AndreasFackler@gmx.de>",
            "Peter van Nostrand <jnz@riseup.net>",
            "Andrew Gross <andogro@gmail.com>",
-           "Nick Sanders <nsan1129@gmail.com>"]
+           "Nick Sanders <nsan1129@gmail.com>",
+           "Marc Brinkmann <git@marcbrinkmann.de>"]
 description = "Honey Badger Byzantine fault tolerant consensus algorithm"
 license = "LGPL-3.0"
 repository = "https://github.com/poanetwork/hbbft"
@@ -22,7 +23,6 @@ byteorder = "1.2.3"
 env_logger = "0.5.10"
 failure = "0.1"
 init_with = "1.1.0"
-itertools = "0.7"
 log = "0.4.1"
 pairing = { version = "0.14.2", features = ["u128-support"] }
 rand = "0.4.2"
@@ -38,6 +38,7 @@ colored = "1.6"
 crossbeam = "0.3.2"
 crossbeam-channel = "0.1"
 docopt = "1.0"
+itertools = "0.7"
 serde_derive = "1.0.55"
 signifix = "0.9"
 proptest = "0.8.6"
