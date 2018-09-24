@@ -68,46 +68,46 @@ where
         // `Target::All` messages contained in the result of the partitioning are analyzed further
         // and each split into two sets of point messages: those which can be sent without delay and
         // those which should be postponed.
-        let (multicasts, mut deferred_msgs): (Vec<_>, Vec<_>) = failed_msgs
-            .into_iter()
-            .partition(|msg| Target::All == msg.target);
         let remote_nodes: BTreeSet<&N> = remote_ids.collect();
-        for msg in multicasts {
-            let message = msg.message;
-            debug!("Filtered out broadcast: {:?}", message);
-            let epoch = message.epoch();
-            let isnt_late = |&them: &u64| accepts(epoch, them) || is_early(epoch, them);
-            let accepts = |&them: &u64| accepts(epoch, them);
-            let accepting_nodes: BTreeSet<&N> = remote_epochs
-                .iter()
-                .filter(|(_, them)| accepts(them))
-                .map(|(id, _)| id)
-                .collect();
-            let non_late_nodes: BTreeSet<&N> = remote_epochs
-                .iter()
-                .filter(|(_, them)| isnt_late(them))
-                .map(|(id, _)| id)
-                .collect();
-            for &id in &accepting_nodes {
-                passed_msgs.push(Target::Node(id.clone()).message(message.clone()));
+        let mut deferred_msgs: Vec<(N, Message<N>)> = Vec::new();
+        for msg in failed_msgs {
+            match msg.target {
+                Target::Node(id) => {
+                    deferred_msgs.push((id, msg.message));
+                }
+                Target::All => {
+                    let message = msg.message;
+                    debug!("Filtered out broadcast: {:?}", message);
+                    let epoch = message.epoch();
+                    let isnt_late = |&them: &u64| accepts(epoch, them) || is_early(epoch, them);
+                    let accepts = |&them: &u64| accepts(epoch, them);
+                    let accepting_nodes: BTreeSet<&N> = remote_epochs
+                        .iter()
+                        .filter(|(_, them)| accepts(them))
+                        .map(|(id, _)| id)
+                        .collect();
+                    let non_late_nodes: BTreeSet<&N> = remote_epochs
+                        .iter()
+                        .filter(|(_, them)| isnt_late(them))
+                        .map(|(id, _)| id)
+                        .collect();
+                    for &id in &accepting_nodes {
+                        passed_msgs.push(Target::Node(id.clone()).message(message.clone()));
+                    }
+                    let late_nodes: BTreeSet<_> =
+                        remote_nodes.difference(&non_late_nodes).collect();
+                    for &&id in &late_nodes {
+                        deferred_msgs.push((id.clone(), message.clone()));
+                    }
+                    debug!(
+                        "Accepting nodes: {:?} --- Late nodes: {:?} --- All remote nodes: {:?}",
+                        accepting_nodes, late_nodes, remote_nodes
+                    );
+                }
             }
-            let late_nodes: BTreeSet<_> = remote_nodes.difference(&non_late_nodes).collect();
-            for &&id in &late_nodes {
-                deferred_msgs.push(Target::Node(id.clone()).message(message.clone()));
-            }
-            debug!(
-                "Accepting nodes: {:?} --- Late nodes: {:?} --- All remote nodes: {:?}",
-                accepting_nodes, late_nodes, remote_nodes
-            );
         }
         self.messages.extend(passed_msgs);
-        deferred_msgs.into_iter().map(|msg| {
-            if let Target::Node(id) = msg.target {
-                (id, msg.message)
-            } else {
-                panic!("`defer_messages` failed");
-            }
-        })
+        deferred_msgs.into_iter()
     }
 }
 

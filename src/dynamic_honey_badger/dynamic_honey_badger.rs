@@ -102,12 +102,18 @@ where
         let remote_nodes: BTreeSet<&N> = remote_ids.collect();
         let mut deferred_msgs: Vec<(N, Message<N>)> = Vec::new();
         for msg in failed_msgs {
+            let message = msg.message;
+            let dynamic_epoch = message.dynamic_epoch();
+            let is_dynamic = message.is_dynamic();
+            let deferrable = |&them| !is_early(dynamic_epoch, is_dynamic, them);
             match msg.target {
+                Target::Node(id) => {
+                    if remote_epochs.get(&id).map_or(false, deferrable) {
+                        deferred_msgs.push((id, message));
+                    }
+                }
                 Target::All => {
-                    let message = msg.message;
                     debug!("Filtered out broadcast: {:?}", message);
-                    let dynamic_epoch = message.dynamic_epoch();
-                    let is_dynamic = message.is_dynamic();
                     let isnt_late = |&them: &DynamicEpoch| {
                         accepts(dynamic_epoch, is_dynamic, them)
                             || is_early(dynamic_epoch, is_dynamic, them)
@@ -130,37 +136,18 @@ where
                         remote_nodes.difference(&non_late_nodes).collect();
                     // FIXME: remove second reference after removing debug output.
                     for &&id in &late_nodes {
-                        deferred_msgs.push((id.clone(), message.clone()));
+                        if remote_epochs.get(&id).map_or(false, deferrable) {
+                            deferred_msgs.push((id.clone(), message.clone()));
+                        }
                     }
                     debug!(
                         "Accepting nodes: {:?} --- Late nodes: {:?} --- All remote nodes: {:?}",
                         accepting_nodes, late_nodes, remote_nodes
                     );
                 }
-                Target::Node(id) => {
-                    debug!("Deferring {:?}:{:?}", id, msg.message);
-                    deferred_msgs.push((id, msg.message));
-                }
             }
         }
         self.messages.extend(passed_msgs);
-        // Remove any messages to nodes with later epochs from the deferred messages.
-        let (deferred_msgs, deleted_msgs): (Vec<_>, Vec<_>) =
-            deferred_msgs
-                .into_iter()
-                .partition(|(id, message)| match message {
-                    Message::DynamicHoneyBadger(ref content) => {
-                        let dynamic_epoch = content.dynamic_epoch();
-                        let is_dynamic = content.is_dynamic();
-                        let pass =
-                            |&them: &DynamicEpoch| !is_early(dynamic_epoch, is_dynamic, them);
-                        remote_epochs.get(&id).map_or(false, pass)
-                    }
-                    Message::DynamicEpochStarted(_) => panic!("`DynamicEpochStarted` is deferred"),
-                });
-        if !deleted_msgs.is_empty() {
-            warn!("Deleted messages: {:?}", deleted_msgs);
-        }
         deferred_msgs.into_iter()
     }
 }
