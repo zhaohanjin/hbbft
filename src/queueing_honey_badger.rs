@@ -23,7 +23,7 @@
 //! the same transaction multiple times.
 
 use std::cmp;
-use std::fmt::{self, Display};
+use std::fmt::{self, Debug, Display};
 use std::marker::PhantomData;
 
 use failure::{Backtrace, Context, Fail};
@@ -138,14 +138,14 @@ where
     /// Returns a new Queueing Honey Badger instance that starts with the given transactions in its
     /// buffer.
     pub fn build_with_transactions<TI>(
-        self,
+        mut self,
         txs: TI,
     ) -> Result<(QueueingHoneyBadger<T, N>, Step<T, N>)>
     where
         TI: IntoIterator<Item = T>,
         T: Contribution + Serialize + for<'r> Deserialize<'r>,
     {
-        let queue = TransactionQueue(txs.into_iter().collect());
+        let queue = TransactionQueue::new(&mut self.dyn_hb.rng, txs.into_iter().collect());
         let mut qhb = QueueingHoneyBadger {
             dyn_hb: self.dyn_hb,
             queue,
@@ -158,7 +158,6 @@ where
 
 /// A Honey Badger instance that can handle adding and removing nodes and manages a transaction
 /// queue.
-#[derive(Debug)]
 pub struct QueueingHoneyBadger<T, N>
 where
     T: Contribution + Serialize + for<'r> Deserialize<'r>,
@@ -170,6 +169,20 @@ where
     dyn_hb: DynamicHoneyBadger<Vec<T>, N>,
     /// The queue of pending transactions that haven't been output in a batch yet.
     queue: TransactionQueue<T>,
+}
+
+impl<T, N> Debug for QueueingHoneyBadger<T, N>
+where
+    T: Contribution + Serialize + for<'r> Deserialize<'r> + Debug,
+    N: NodeIdT + Serialize + for<'r> Deserialize<'r> + Rand + Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("QueueingHoneyBadger")
+            .field("batch_size", &self.batch_size)
+            .field("dyn_hb", &self.dyn_hb)
+            .field("queue", &self.queue)
+            .finish()
+    }
 }
 
 pub type Step<T, N> = messaging::Step<QueueingHoneyBadger<T, N>>;
@@ -190,7 +203,7 @@ where
         // in addition signed and broadcast.
         let mut step = match input {
             Input::User(tx) => {
-                self.queue.0.push_back(tx);
+                self.queue.transactions.push_back(tx);
                 Step::default()
             }
             Input::Change(change) => self
@@ -248,7 +261,7 @@ where
         if self.dyn_hb.has_input() {
             return false; // Previous epoch is still in progress.
         }
-        !self.queue.0.is_empty() || self.dyn_hb.should_propose()
+        !self.queue.transactions.is_empty() || self.dyn_hb.should_propose()
     }
 
     /// Initiates the next epoch by proposing a batch from the queue.
