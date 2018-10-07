@@ -22,17 +22,18 @@ use std::sync::Arc;
 use hbbft::dynamic_honey_badger::DynamicHoneyBadger;
 use hbbft::messaging::NetworkInfo;
 use hbbft::queueing_honey_badger::{Batch, Change, ChangeState, Input, QueueingHoneyBadger, Step};
+use hbbft::transaction_queue::VecDequeTransactionQueue;
 use itertools::Itertools;
 use rand::Rng;
 
 use network::{Adversary, MessageScheduler, NodeId, SilentAdversary, TestNetwork, TestNode};
 
+type QHB = QueueingHoneyBadger<usize, NodeId, VecDequeTransactionQueue<usize>>;
+
 /// Proposes `num_txs` values and expects nodes to output and order them.
-fn test_queueing_honey_badger<A>(
-    mut network: TestNetwork<A, QueueingHoneyBadger<usize, NodeId>>,
-    num_txs: usize,
-) where
-    A: Adversary<QueueingHoneyBadger<usize, NodeId>>,
+fn test_queueing_honey_badger<A>(mut network: TestNetwork<A, QHB>, num_txs: usize)
+where
+    A: Adversary<QHB>,
 {
     // The second half of the transactions will be input only after a node has been removed.
     network.input_all(Input::Change(Change::Remove(NodeId(0))));
@@ -40,13 +41,13 @@ fn test_queueing_honey_badger<A>(
         network.input_all(Input::User(tx));
     }
 
-    fn has_remove(node: &TestNode<QueueingHoneyBadger<usize, NodeId>>) -> bool {
+    fn has_remove(node: &TestNode<QHB>) -> bool {
         node.outputs()
             .iter()
             .any(|batch| *batch.change() == ChangeState::Complete(Change::Remove(NodeId(0))))
     }
 
-    fn has_add(node: &TestNode<QueueingHoneyBadger<usize, NodeId>>) -> bool {
+    fn has_add(node: &TestNode<QHB>) -> bool {
         node.outputs().iter().any(|batch| match *batch.change() {
             ChangeState::Complete(Change::Add(ref id, _)) => *id == NodeId(0),
             _ => false,
@@ -55,7 +56,7 @@ fn test_queueing_honey_badger<A>(
 
     // Returns `true` if the node has not output all transactions yet.
     // If it has, and has advanced another epoch, it clears all messages for later epochs.
-    let node_busy = |node: &mut TestNode<QueueingHoneyBadger<usize, NodeId>>| {
+    let node_busy = |node: &mut TestNode<QHB>| {
         if !has_remove(node) || !has_add(node) {
             return true;
         }
@@ -89,9 +90,9 @@ fn test_queueing_honey_badger<A>(
 /// Verifies that all instances output the same sequence of batches. We already know that all of
 /// them have output all transactions and events, but some may have advanced a few empty batches
 /// more than others, so we ignore those.
-fn verify_output_sequence<A>(network: &TestNetwork<A, QueueingHoneyBadger<usize, NodeId>>)
+fn verify_output_sequence<A>(network: &TestNetwork<A, QHB>)
 where
-    A: Adversary<QueueingHoneyBadger<usize, NodeId>>,
+    A: Adversary<QHB>,
 {
     let expected = network.nodes[&NodeId(0)].outputs().to_vec();
     assert!(!expected.is_empty());
@@ -105,7 +106,7 @@ where
 #[cfg_attr(feature = "cargo-clippy", allow(needless_pass_by_value))]
 fn new_queueing_hb(
     netinfo: Arc<NetworkInfo<NodeId>>,
-) -> (QueueingHoneyBadger<usize, NodeId>, Step<usize, NodeId>) {
+) -> (QHB, Step<usize, NodeId, VecDequeTransactionQueue<usize>>) {
     let (dhb, dhb_step) = DynamicHoneyBadger::builder()
         .build((*netinfo).clone())
         .expect("`new_queueing_hb` failed");
@@ -117,7 +118,7 @@ fn new_queueing_hb(
 
 fn test_queueing_honey_badger_different_sizes<A, F>(new_adversary: F, num_txs: usize)
 where
-    A: Adversary<QueueingHoneyBadger<usize, NodeId>>,
+    A: Adversary<QHB>,
     F: Fn(usize, usize, BTreeMap<NodeId, Arc<NetworkInfo<NodeId>>>) -> A,
 {
     // This returns an error in all but the first test.

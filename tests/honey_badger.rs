@@ -25,7 +25,7 @@ use rand::{Isaac64Rng, Rng};
 use hbbft::honey_badger::{self, Batch, HoneyBadger, MessageContent, Step};
 use hbbft::messaging::{NetworkInfo, Target, TargetedMessage};
 use hbbft::threshold_decryption;
-use hbbft::transaction_queue::TransactionQueue;
+use hbbft::transaction_queue::{TransactionQueue, VecDequeTransactionQueue};
 
 use network::{
     Adversary, MessageScheduler, MessageWithSender, NodeId, RandomAdversary, SilentAdversary,
@@ -129,7 +129,12 @@ where
     A: Adversary<UsizeHoneyBadger>,
 {
     let mut rng = rand::thread_rng().gen::<Isaac64Rng>();
-    let new_queue = |id: &NodeId| (*id, TransactionQueue::new(&mut rng, (0..num_txs).collect()));
+    let new_queue = |id: &NodeId| {
+        (
+            *id,
+            VecDequeTransactionQueue::new(&mut rng, (0..num_txs).collect()),
+        )
+    };
     let mut queues: BTreeMap<_, _> = network.nodes.keys().map(new_queue).collect();
 
     // Returns `true` if the node has not output all transactions yet.
