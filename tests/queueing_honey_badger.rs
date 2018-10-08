@@ -19,16 +19,16 @@ use std::cmp;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use itertools::Itertools;
+use rand::{Isaac64Rng, Rng};
+
 use hbbft::dynamic_honey_badger::DynamicHoneyBadger;
 use hbbft::messaging::NetworkInfo;
 use hbbft::queueing_honey_badger::{Batch, Change, ChangeState, Input, QueueingHoneyBadger, Step};
-use hbbft::transaction_queue::VecDequeTransactionQueue;
-use itertools::Itertools;
-use rand::Rng;
 
 use network::{Adversary, MessageScheduler, NodeId, SilentAdversary, TestNetwork, TestNode};
 
-type QHB = QueueingHoneyBadger<usize, NodeId, VecDequeTransactionQueue<usize>>;
+type QHB = QueueingHoneyBadger<usize, NodeId, Vec<usize>>;
 
 /// Proposes `num_txs` values and expects nodes to output and order them.
 fn test_queueing_honey_badger<A>(mut network: TestNetwork<A, QHB>, num_txs: usize)
@@ -104,13 +104,12 @@ where
 
 // Allow passing `netinfo` by value. `TestNetwork` expects this function signature.
 #[cfg_attr(feature = "cargo-clippy", allow(needless_pass_by_value))]
-fn new_queueing_hb(
-    netinfo: Arc<NetworkInfo<NodeId>>,
-) -> (QHB, Step<usize, NodeId, VecDequeTransactionQueue<usize>>) {
+fn new_queueing_hb(netinfo: Arc<NetworkInfo<NodeId>>) -> (QHB, Step<usize, NodeId, Vec<usize>>) {
     let (dhb, dhb_step) = DynamicHoneyBadger::builder()
         .build((*netinfo).clone())
         .expect("`new_queueing_hb` failed");
-    let (qhb, qhb_step) = QueueingHoneyBadger::builder(dhb).batch_size(3).build();
+    let rng = rand::thread_rng().gen::<Isaac64Rng>();
+    let (qhb, qhb_step) = QueueingHoneyBadger::builder(dhb).batch_size(3).build(rng);
     let mut step = dhb_step.convert();
     step.extend(qhb_step);
     (qhb, step)
