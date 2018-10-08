@@ -23,7 +23,7 @@
 //! the same transaction multiple times.
 
 use std::cmp;
-use std::fmt::{self, Debug, Display};
+use std::fmt::{self, Display};
 use std::marker::PhantomData;
 
 use failure::{Backtrace, Context, Fail};
@@ -110,7 +110,7 @@ impl<T, N, Q> QueueingHoneyBadgerBuilder<T, N, Q>
 where
     T: Contribution + Serialize + for<'r> Deserialize<'r> + Clone,
     N: NodeIdT + Serialize + for<'r> Deserialize<'r> + Rand,
-    Q: TransactionQueue<T> + Debug + Default + Extend<T> + Sync + Send,
+    Q: TransactionQueue<T>,
 {
     /// Returns a new `QueueingHoneyBadgerBuilder` configured to use the node IDs and cryptographic
     /// keys specified by `netinfo`.
@@ -175,7 +175,7 @@ pub struct QueueingHoneyBadger<T, N, Q>
 where
     T: Contribution + Serialize + for<'r> Deserialize<'r>,
     N: NodeIdT + Serialize + for<'r> Deserialize<'r> + Rand,
-    Q: TransactionQueue<T> + Debug,
+    Q: TransactionQueue<T>,
 {
     /// The target number of transactions to be included in each batch.
     batch_size: usize,
@@ -191,7 +191,7 @@ impl<T, N, Q> DistAlgorithm for QueueingHoneyBadger<T, N, Q>
 where
     T: Contribution + Serialize + for<'r> Deserialize<'r> + Clone,
     N: NodeIdT + Serialize + for<'r> Deserialize<'r> + Rand,
-    Q: TransactionQueue<T> + Debug + Default + Extend<T> + Sync + Send,
+    Q: TransactionQueue<T>,
 {
     type NodeId = N;
     type Input = Input<T, N>;
@@ -243,7 +243,7 @@ impl<T, N, Q> QueueingHoneyBadger<T, N, Q>
 where
     T: Contribution + Serialize + for<'r> Deserialize<'r> + Clone,
     N: NodeIdT + Serialize + for<'r> Deserialize<'r> + Rand,
-    Q: TransactionQueue<T> + Debug + Default + Extend<T> + Sync + Send,
+    Q: TransactionQueue<T>,
 {
     /// Returns a new `QueueingHoneyBadgerBuilder` configured to use the node IDs and cryptographic
     /// keys specified by `netinfo`.
